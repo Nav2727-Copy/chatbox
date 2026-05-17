@@ -969,7 +969,7 @@ int main()
 
 		box(stdscr, 0, 0);
 
-		mvprintw(2, 4, "chatbox alpha 0.0.1");
+		mvprintw(2, 4, "chatbox alpha");
 
 		mvprintw(4, 4, "[H] Host server");
 		mvprintw(5, 4, "[J] Join server");
