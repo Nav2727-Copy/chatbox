@@ -5,7 +5,7 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 
 /*
-Todo: 
+Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 - Add command-line options for server mode (e.g. listen port, password, log file, etc)
 - Add support for private messages between users
 - Add support for multiple chat rooms (currently only one global room)
