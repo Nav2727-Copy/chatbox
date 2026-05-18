@@ -39,7 +39,3 @@ target_link_libraries(chatbox PRIVATE miniupnpc::miniupnpc)
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET chatbox PROPERTY CXX_STANDARD 20)
 endif()
-
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET chatbox_server PROPERTY CXX_STANDARD 20)
-endif()
