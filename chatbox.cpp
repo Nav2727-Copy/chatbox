@@ -195,6 +195,7 @@ constexpr int BROWSER_PORT = 2727;
 constexpr int BROWSER_NAME_MAX_LEN = 48;
 constexpr int BROWSER_ENTRY_TTL_SECONDS = 180;
 constexpr int BROWSER_PUBLISH_INTERVAL_SECONDS = 60;
+constexpr int BROWSER_CONNECT_TIMEOUT_SECONDS = 5;
 
 std::string g_nickname;
 
@@ -1014,14 +1015,28 @@ private:
             boost::asio::io_context io;
             tcp::resolver resolver(io);
             tcp::socket socket(io);
-            auto endpoints = resolver.resolve(browser_host, std::to_string(browser_port));
-            boost::asio::connect(socket, endpoints);
+            boost::system::error_code ec;
+            auto endpoints = resolver.resolve(browser_host, std::to_string(browser_port), ec);
+            if (ec)
+            {
+                error = browser_connection_error(browser_host, browser_port,
+                    "Could not resolve browser server: " + ec.message());
+                return false;
+            }
+
+            if (!connect_with_timeout(io, socket, endpoints, browser_host, browser_port, error))
+                return false;
 
             std::string payload = encode_base64(request) + "\n";
-            boost::asio::write(socket, boost::asio::buffer(payload));
+            boost::asio::write(socket, boost::asio::buffer(payload), ec);
+            if (ec)
+            {
+                error = browser_connection_error(browser_host, browser_port,
+                    "Could not send request: " + ec.message());
+                return false;
+            }
 
             boost::asio::streambuf buffer(MAX_WIRE_LINE_LENGTH);
-            boost::system::error_code ec;
             while (true)
             {
                 boost::asio::read_until(socket, buffer, '\n', ec);
@@ -1045,9 +1060,14 @@ private:
             }
             return true;
         }
+        catch (const boost::system::system_error& ex)
+        {
+            error = browser_connection_error(browser_host, browser_port, ex.code().message());
+            return false;
+        }
         catch (const std::exception& ex)
         {
-            error = ex.what();
+            error = browser_connection_error(browser_host, browser_port, ex.what());
             return false;
         }
         catch (...)
@@ -1055,6 +1075,55 @@ private:
             error = "Unknown browser connection error";
             return false;
         }
+    }
+
+    static std::string browser_connection_error(
+        const std::string& browser_host,
+        uint16_t browser_port,
+        const std::string& detail)
+    {
+        return detail + " (" + browser_host + ":" + std::to_string(browser_port)
+            + "). Make sure a chatbox browser server is running there and that port "
+            + std::to_string(browser_port) + " is open or forwarded.";
+    }
+
+    static bool connect_with_timeout(
+        boost::asio::io_context& io,
+        tcp::socket& socket,
+        const tcp::resolver::results_type& endpoints,
+        const std::string& browser_host,
+        uint16_t browser_port,
+        std::string& error)
+    {
+        bool finished = false;
+        boost::system::error_code connect_ec;
+
+        boost::asio::async_connect(socket, endpoints,
+            [&](const boost::system::error_code& ec, const tcp::endpoint&)
+            {
+                connect_ec = ec;
+                finished = true;
+            });
+
+        io.restart();
+        io.run_for(std::chrono::seconds(BROWSER_CONNECT_TIMEOUT_SECONDS));
+
+        if (!finished)
+        {
+            boost::system::error_code ignored;
+            socket.close(ignored);
+            error = browser_connection_error(browser_host, browser_port,
+                "Timed out connecting to browser server");
+            return false;
+        }
+
+        if (connect_ec)
+        {
+            error = browser_connection_error(browser_host, browser_port, connect_ec.message());
+            return false;
+        }
+
+        return true;
     }
 };
 
@@ -2421,13 +2490,12 @@ bool parse_port(const std::string& text, uint16_t& port)
 
 bool parse_browser_address(const std::string& text, std::string& host)
 {
-    if (text.empty())
+    host = sanitize_browser_field(text, HOST_MAX_LEN);
+    if (host.empty())
         return false;
 
-    if (text.find(':') != std::string::npos)
+    if (host.find(':') != std::string::npos)
         return false;
-
-    host = text;
     return true;
 }
 
@@ -2492,6 +2560,44 @@ int run_browser_server(uint16_t port)
     ServerBrowser browser(io, port);
 
     std::cout << "chatbox server browser running on port " << port << "\n";
+    UPnPMapper upnp;
+    if (upnp.discover())
+    {
+        if (upnp.openPortBoth(std::to_string(port), "chatbox server browser"))
+        {
+            std::cout << "[browser] UPnP port mapping succeeded\n";
+            if (!upnp.externalIP().empty())
+                std::cout << "[browser] External address: "
+                    << upnp.externalIP() << ":" << port << "\n";
+        }
+        else
+        {
+            std::cout << "[browser] UPnP mapping failed: " << upnp.lastError() << "\n";
+            std::cout << "[browser] Forward port " << port
+                << " manually for internet access\n";
+        }
+    }
+    else
+    {
+        std::cout << "[browser] UPnP unavailable: " << upnp.lastError() << "\n";
+        std::cout << "[browser] Forward port " << port
+            << " manually for internet access\n";
+    }
+
+    try
+    {
+        tcp::resolver resolver(io);
+        auto results = resolver.resolve(boost::asio::ip::host_name(), "");
+        std::cout << "[browser] LAN addresses:\n";
+        for (auto& result : results)
+        {
+            auto addr = result.endpoint().address();
+            if (!addr.is_loopback())
+                std::cout << "[browser]   " << addr.to_string() << ":" << port << "\n";
+        }
+    }
+    catch (...) {}
+
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
 
@@ -2880,7 +2986,13 @@ int main(int argc, char* argv[])
                 return 1;
             }
 
-            std::string browser_host = argv[2];
+            std::string browser_host;
+            if (!parse_browser_address(argv[2], browser_host))
+            {
+                std::cerr << "Invalid browser address. Use only the browser host/IP; port "
+                    << BROWSER_PORT << " is fixed.\n";
+                return 1;
+            }
             if (argc >= 4)
             {
                 std::cerr << "--browse uses fixed browser port " << BROWSER_PORT << "\n";
@@ -3022,12 +3134,11 @@ int main(int argc, char* argv[])
 
             if (publish_to_browser)
             {
-                config.browser_host = browser_host_buf;
-                if (config.browser_host.empty())
+                if (!parse_browser_address(browser_host_buf, config.browser_host))
                 {
                     erase();
                     box(stdscr, 0, 0);
-                    mvprintw(2, 4, "Browser server IP is required to publish.");
+                    mvprintw(2, 4, "Enter only the browser server host/IP, without a port.");
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     continue;
@@ -3174,10 +3285,10 @@ int main(int argc, char* argv[])
                 std::string browser_host = browser_host_buf;
                 if (publish_to_browser)
                 {
-                    if (browser_host.empty())
+                    if (!parse_browser_address(browser_host_buf, browser_host))
                     {
                         erase(); box(stdscr, 0, 0);
-                        mvprintw(2, 4, "Browser server IP is required to publish.");
+                        mvprintw(2, 4, "Enter only the browser server host/IP, without a port.");
                         refresh();
                         std::this_thread::sleep_for(std::chrono::seconds(2));
                         continue;
@@ -3329,11 +3440,11 @@ int main(int argc, char* argv[])
                 getnstr(browser_host_buf, HOST_MAX_LEN);
                 noecho();
 
-                std::string browser_host = browser_host_buf;
-                if (browser_host.empty())
+                std::string browser_host;
+                if (!parse_browser_address(browser_host_buf, browser_host))
                 {
                     erase(); box(stdscr, 0, 0);
-                    mvprintw(2, 4, "Browser server IP is required.");
+                    mvprintw(2, 4, "Enter only the browser server host/IP, without a port.");
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     continue;
