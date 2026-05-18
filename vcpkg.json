@@ -4,6 +4,7 @@
   "dependencies": [
     "boost-asio",
     "pdcurses",
-    "miniupnpc"
+    "miniupnpc",
+    "libsodium"
   ]
 }

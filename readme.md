@@ -13,6 +13,7 @@
 - Host or join a TCP chat room from the terminal
 - Run a headless dedicated server from the menu or command line
 - Optional room password on hosted and dedicated rooms
+- Public-key nickname identity: first use registers a nickname key, future joins must prove the same private key
 - Live user list in a split-pane terminal interface
 - Public messages and labeled private-message commands
 - Private messages are routed only to the sender and recipient
@@ -32,6 +33,7 @@
 | [Boost.Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html) | TCP client/server networking |
 | [PDCurses](https://pdcurses.org/) | Terminal UI on Windows |
 | [miniupnpc](https://miniupnp.tuxfamily.org/) | UPnP router discovery and port mapping |
+| [libsodium](https://libsodium.gitbook.io/doc/) | Public-key signatures for nickname identity |
 
 The current CMake project is set up for vcpkg and PDCurses. The source uses a curses-style API, but the checked-in build configuration is Windows-focused.
 
@@ -106,14 +108,18 @@ You can start dedicated mode from the startup menu or directly from the command 
 ```
 
 If no log file is supplied, the server writes to `chatlog.txt`. Bans are persisted in `bans.txt`.
+Nickname identity bindings are persisted in `identities.txt`.
 
 Dedicated-server options can be mixed with the positional form:
 
 ```powershell
 .\out\build\x64-debug\chatbox.exe --server <port> --password <password> --log <file>
+.\out\build\x64-debug\chatbox.exe --server <port> --identities identities.txt
 .\out\build\x64-debug\chatbox.exe --server <port> --no-upnp --no-log
 .\out\build\x64-debug\chatbox.exe --server <port> --log-stdout
 ```
+
+Use `--identities <file>` to choose where the dedicated server stores nickname-to-public-key bindings.
 
 Dedicated-server console commands:
 
@@ -154,6 +160,8 @@ Additional commands available when you are the interactive host:
 
 Messages and protocol frames are Base64-encoded before being sent over TCP. Base64 is not encryption. Room passwords are also transported inside that same encoded protocol, so this is suitable for trusted LANs or casual testing, not sensitive communication over untrusted networks.
 
+Nickname identity is based on libsodium Ed25519 signatures. On first use, the client creates a local signing key named `chatbox_identity_<nickname-hex>.key`; the server stores that nickname's public key in `identities.txt`. Later joins must answer a random server challenge with the matching private key before the nickname is accepted.
+
 For real privacy, the networking layer would need authenticated encryption such as TLS or a libsodium-style key exchange and message encryption scheme.
 
 ## Project Structure
@@ -171,7 +179,8 @@ chatbox/
 ## Known Limitations
 
 - `/whisper` messages are routed privately by the server, but they are not encrypted end-to-end.
-- There is no cryptographic encryption or authentication.
+- Public-key identity proves control of a local key, but it does not encrypt messages.
+- If a user's local identity key file is lost, the server will reject that nickname until the server identity binding is reset.
 - Interactive-host bans are session-only; dedicated-server bans persist in `bans.txt`.
 - Message history is in-memory only and resets when the server exits.
 - The checked-in CMake setup is primarily configured for Windows with PDCurses.

@@ -26,6 +26,7 @@ endif()
 find_package(Boost REQUIRED COMPONENTS asio)
 find_package(unofficial-pdcurses CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
+find_package(unofficial-sodium CONFIG REQUIRED)
 
 # =====================================================
 # chatbox  (full client + embedded host, uses ncurses)
@@ -35,6 +36,7 @@ add_executable(chatbox "chatbox.cpp")
 target_link_libraries(chatbox PRIVATE Boost::asio)
 target_link_libraries(chatbox PRIVATE unofficial::pdcurses::pdcurses)
 target_link_libraries(chatbox PRIVATE miniupnpc::miniupnpc)
+target_link_libraries(chatbox PRIVATE unofficial-sodium::sodium)
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET chatbox PROPERTY CXX_STANDARD 20)

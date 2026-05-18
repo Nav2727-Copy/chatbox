@@ -6,10 +6,9 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 /*
 Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
-- Add support for multiple chat rooms (currently only one global room)
+- Add a server browser function to program (like the dedicated server), servers can send data about themselves to user hosted browser server, and clients can query browser server for list of available servers. This is a must for the program to be usable by non-technical people.
 - Add real encryption for password protected rooms
-- Clean up code and improve structure (currently a bit of a mess, especially with global variables)
-- Regret life.
+- Refactor the codebase to be more modular for future GUI version, and to generally improve code quality
 */
 
 // needs vcpkg my beloved
@@ -17,6 +16,7 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
 #include <boost/asio.hpp>
+#include <sodium.h>
 
 // c++20 standard libraries
 #include <algorithm>
@@ -27,6 +27,7 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 #include <format>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -187,6 +188,7 @@ constexpr int HOST_MAX_LEN = 63;
 constexpr int PORT_MAX_LEN = 15;
 constexpr int PASS_MAX_LEN = 63;
 constexpr int LOGFILE_MAX_LEN = 259;
+constexpr int IDENTITY_CHALLENGE_BYTES = 32;
 
 std::string g_nickname;
 
@@ -293,6 +295,168 @@ std::string decode_base64(const std::string& input)
     if (!try_decode_base64(input, output))
         return "";
     return output;
+}
+
+std::string bytes_to_hex(const unsigned char* data, size_t len)
+{
+    std::string hex(len * 2 + 1, '\0');
+    sodium_bin2hex(hex.data(), hex.size(), data, len);
+    hex.pop_back();
+    return hex;
+}
+
+bool hex_to_bytes(const std::string& hex, unsigned char* out, size_t out_len)
+{
+    size_t actual_len = 0;
+    return sodium_hex2bin(
+        out,
+        out_len,
+        hex.c_str(),
+        hex.size(),
+        nullptr,
+        &actual_len,
+        nullptr) == 0 && actual_len == out_len;
+}
+
+bool is_hex_of_len(const std::string& text, size_t bytes)
+{
+    if (text.size() != bytes * 2)
+        return false;
+
+    for (unsigned char ch : text)
+    {
+        if (!std::isxdigit(ch))
+            return false;
+    }
+
+    return true;
+}
+
+std::string hex_from_text(const std::string& text)
+{
+    return bytes_to_hex(
+        reinterpret_cast<const unsigned char*>(text.data()),
+        text.size());
+}
+
+std::string random_hex(size_t bytes)
+{
+    std::vector<unsigned char> data(bytes);
+    randombytes_buf(data.data(), data.size());
+    return bytes_to_hex(data.data(), data.size());
+}
+
+struct ClientIdentity
+{
+    std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> public_key{};
+    std::array<unsigned char, crypto_sign_SECRETKEYBYTES> secret_key{};
+    std::string public_key_hex;
+};
+
+std::string identity_file_for_nickname(const std::string& nick)
+{
+    return "chatbox_identity_" + hex_from_text(nick) + ".key";
+}
+
+bool load_identity_file(const std::string& path, ClientIdentity& identity)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        return false;
+
+    std::string public_hex;
+    std::string secret_hex;
+    std::getline(file, public_hex);
+    std::getline(file, secret_hex);
+
+    if (!is_hex_of_len(public_hex, crypto_sign_PUBLICKEYBYTES) ||
+        !is_hex_of_len(secret_hex, crypto_sign_SECRETKEYBYTES))
+    {
+        return false;
+    }
+
+    if (!hex_to_bytes(public_hex, identity.public_key.data(), identity.public_key.size()) ||
+        !hex_to_bytes(secret_hex, identity.secret_key.data(), identity.secret_key.size()))
+    {
+        return false;
+    }
+
+    identity.public_key_hex = public_hex;
+    return true;
+}
+
+bool save_identity_file(const std::string& path, const ClientIdentity& identity)
+{
+    std::ofstream file(path, std::ios::trunc);
+    if (!file.is_open())
+        return false;
+
+    file << identity.public_key_hex << "\n";
+    file << bytes_to_hex(identity.secret_key.data(), identity.secret_key.size()) << "\n";
+    return true;
+}
+
+bool load_or_create_identity(const std::string& nick, ClientIdentity& identity, bool& created)
+{
+    const std::string path = identity_file_for_nickname(nick);
+    created = false;
+
+    if (load_identity_file(path, identity))
+        return true;
+
+    crypto_sign_keypair(identity.public_key.data(), identity.secret_key.data());
+    identity.public_key_hex = bytes_to_hex(identity.public_key.data(), identity.public_key.size());
+    created = true;
+    return save_identity_file(path, identity);
+}
+
+std::string sign_identity_challenge(const ClientIdentity& identity, const std::string& challenge)
+{
+    std::array<unsigned char, crypto_sign_BYTES> signature{};
+    unsigned long long signature_len = 0;
+
+    crypto_sign_detached(
+        signature.data(),
+        &signature_len,
+        reinterpret_cast<const unsigned char*>(challenge.data()),
+        static_cast<unsigned long long>(challenge.size()),
+        identity.secret_key.data());
+
+    return bytes_to_hex(signature.data(), signature_len);
+}
+
+bool verify_identity_signature(
+    const std::string& public_key_hex,
+    const std::string& challenge,
+    const std::string& signature_hex)
+{
+    if (!is_hex_of_len(public_key_hex, crypto_sign_PUBLICKEYBYTES) ||
+        !is_hex_of_len(signature_hex, crypto_sign_BYTES))
+    {
+        return false;
+    }
+
+    std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> public_key{};
+    std::array<unsigned char, crypto_sign_BYTES> signature{};
+
+    if (!hex_to_bytes(public_key_hex, public_key.data(), public_key.size()) ||
+        !hex_to_bytes(signature_hex, signature.data(), signature.size()))
+    {
+        return false;
+    }
+
+    return crypto_sign_verify_detached(
+        signature.data(),
+        reinterpret_cast<const unsigned char*>(challenge.data()),
+        static_cast<unsigned long long>(challenge.size()),
+        public_key.data()) == 0;
+}
+
+std::string identity_fingerprint(const std::string& public_key_hex)
+{
+    if (public_key_hex.size() <= 16)
+        return public_key_hex;
+    return public_key_hex.substr(0, 16);
 }
 
 void strip_wire_newline(std::string& line)
@@ -508,7 +672,7 @@ public:
     void deliver(const std::string& msg);
     void close();
 
-    // The nickname is set once AUTH/JOIN is accepted
+    // The nickname is set once identity proof is accepted
     const std::string& nickname() const { return nickname_; }
 
 private:
@@ -522,6 +686,9 @@ private:
     std::deque<std::string> write_queue_;
     std::deque<std::chrono::steady_clock::time_point> recent_messages_;
     std::string   nickname_;
+    std::string   pending_nickname_;
+    std::string   pending_public_key_hex_;
+    std::string   pending_challenge_;
     bool          authenticated_ = false;   // true after password accepted
     bool          close_after_write_ = false;
     bool          suppress_leave_notice_ = false;
@@ -566,6 +733,86 @@ public:
     {
         auto users = ::connected_users();
         return std::find(users.begin(), users.end(), nick) != users.end();
+    }
+
+    bool identity_available_for(const std::string& nick,
+        const std::string& public_key_hex,
+        std::string& error) const
+    {
+        if (!is_valid_nickname(nick))
+        {
+            error = "Invalid nickname";
+            return false;
+        }
+
+        if (!is_hex_of_len(public_key_hex, crypto_sign_PUBLICKEYBYTES))
+        {
+            error = "Invalid identity public key";
+            return false;
+        }
+
+        std::lock_guard lock(identity_mutex_);
+        auto it = identities_.find(nick);
+        if (it != identities_.end() && it->second != public_key_hex)
+        {
+            error = "Nickname belongs to a different identity key";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool bind_identity(const std::string& nick, const std::string& public_key_hex)
+    {
+        std::lock_guard lock(identity_mutex_);
+
+        auto it = identities_.find(nick);
+        if (it != identities_.end())
+            return it->second == public_key_hex;
+
+        identities_[nick] = public_key_hex;
+        save_identities_locked();
+        if (log_)
+            log_->write("[identity] Registered " + nick
+                + " as " + identity_fingerprint(public_key_hex));
+        return true;
+    }
+
+    void load_identities(const std::string& path)
+    {
+        identities_file_ = path;
+
+        std::ifstream file(path);
+        if (!file.is_open())
+            return;
+
+        std::string line;
+        size_t count = 0;
+        {
+            std::lock_guard lock(identity_mutex_);
+            while (std::getline(file, line))
+            {
+                auto parts = split(line, '|');
+                if (parts.size() == 2 &&
+                    is_valid_nickname(parts[0]) &&
+                    is_hex_of_len(parts[1], crypto_sign_PUBLICKEYBYTES))
+                {
+                    identities_[parts[0]] = parts[1];
+                    ++count;
+                }
+            }
+        }
+
+        if (log_)
+            log_->write("[identity] Loaded " + std::to_string(count)
+                + " identity binding(s) from " + path);
+    }
+
+    bool register_local_identity(const std::string& nick, const std::string& public_key_hex)
+    {
+        std::string error;
+        return identity_available_for(nick, public_key_hex, error)
+            && bind_identity(nick, public_key_hex);
     }
 
     void join(std::shared_ptr<ClientSession> session)
@@ -851,11 +1098,22 @@ private:
             file << nick << "\n";
     }
 
+    void save_identities_locked()
+    {
+        if (identities_file_.empty())
+            return;
+
+        std::ofstream file(identities_file_, std::ios::trunc);
+        for (const auto& [nick, public_key_hex] : identities_)
+            file << nick << "|" << public_key_hex << "\n";
+    }
+
     boost::asio::io_context& io_;
     tcp::acceptor acceptor_;
     std::string   password_;
     ChatLog*      log_ = nullptr;
     std::string   bans_file_;
+    std::string   identities_file_ = "identities.txt";
     std::string   local_nickname_;
 
     mutable std::mutex sessions_mutex_;
@@ -863,6 +1121,9 @@ private:
 
     mutable std::mutex ban_mutex_;
     std::set<std::string> banned_nicks_;
+
+    mutable std::mutex identity_mutex_;
+    std::map<std::string, std::string> identities_;
 
     mutable std::mutex history_mutex_;
     std::deque<std::string> history_;
@@ -950,10 +1211,11 @@ void ClientSession::read_loop()
                 return;
             }
 
-            // ---- JOIN ----
-            if (parts[0] == "JOIN" && parts.size() >= 2)
+            // ---- IDENTIFY ----
+            if (parts[0] == "IDENTIFY" && parts.size() >= 3)
             {
                 std::string nick = parts[1];
+                std::string public_key_hex = parts[2];
 
                 if (!nickname_.empty())
                 {
@@ -962,9 +1224,10 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                if (!is_valid_nickname(nick))
+                std::string identity_error;
+                if (!server_.identity_available_for(nick, public_key_hex, identity_error))
                 {
-                    deliver("JOIN_FAIL|Invalid nickname");
+                    deliver("JOIN_FAIL|" + identity_error);
                     close();
                     server_.leave(self);
                     return;
@@ -986,17 +1249,83 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                nickname_ = nick;
+                pending_nickname_ = nick;
+                pending_public_key_hex_ = public_key_hex;
+                pending_challenge_ = random_hex(IDENTITY_CHALLENGE_BYTES);
+                deliver("CHALLENGE|" + pending_challenge_);
+            }
+            // ---- PROOF ----
+            else if (parts[0] == "PROOF" && parts.size() >= 2)
+            {
+                if (!nickname_.empty())
+                {
+                    deliver("JOIN_FAIL|Already joined");
+                    read_loop();
+                    return;
+                }
+
+                if (pending_nickname_.empty() || pending_public_key_hex_.empty() ||
+                    pending_challenge_.empty())
+                {
+                    deliver("JOIN_FAIL|Identify before sending proof");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
+                if (!verify_identity_signature(
+                    pending_public_key_hex_,
+                    pending_challenge_,
+                    parts[1]))
+                {
+                    deliver("JOIN_FAIL|Identity proof failed");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
+                if (server_.is_banned(pending_nickname_))
+                {
+                    deliver("BANNED");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
+                if (server_.nickname_taken(pending_nickname_))
+                {
+                    deliver("NICK_TAKEN");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
+                if (!server_.bind_identity(pending_nickname_, pending_public_key_hex_))
+                {
+                    deliver("JOIN_FAIL|Identity registration failed");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
+                nickname_ = pending_nickname_;
+                const std::string fingerprint = identity_fingerprint(pending_public_key_hex_);
+                pending_nickname_.clear();
+                pending_public_key_hex_.clear();
+                pending_challenge_.clear();
+
                 add_user(nickname_);
+                deliver("IDENTITY_OK|" + fingerprint);
                 deliver("JOIN_OK");
                 server_.deliver_history(self);
                 server_.broadcast("[system] " + nickname_ + " joined");
                 server_.broadcast_users();
             }
             // ---- LEAVE ----
-            else if (parts[0] == "LEAVE" && parts.size() >= 2)
+            else if (parts[0] == "LEAVE")
             {
-                if (nickname_.empty() || parts[1] != nickname_)
+                if (nickname_.empty() ||
+                    (parts.size() >= 2 && parts[1] != nickname_))
                 {
                     deliver("[system] Ignored malformed leave request");
                     read_loop();
@@ -1010,7 +1339,7 @@ void ClientSession::read_loop()
                 server_.broadcast_users();
             }
             // ---- MSG ----
-            else if (parts[0] == "MSG" && parts.size() >= 3)
+            else if (parts[0] == "MSG" && parts.size() >= 2)
             {
                 if (nickname_.empty())
                 {
@@ -1028,14 +1357,9 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                if (parts[1] != nickname_)
-                {
-                    deliver("[system] Ignored message with mismatched sender");
-                    read_loop();
-                    return;
-                }
-
-                std::string message = join_fields(parts, 2, '|');
+                const size_t message_start =
+                    parts.size() >= 3 && parts[1] == nickname_ ? 2 : 1;
+                std::string message = join_fields(parts, message_start, '|');
                 if (!is_valid_chat_message(message))
                 {
                     deliver("[system] Invalid message text");
@@ -1046,7 +1370,7 @@ void ClientSession::read_loop()
                 server_.broadcast("[" + timestamp() + "] " + nickname_ + ": " + message);
             }
             // ---- WHISPER ----
-            else if (parts[0] == "WHISPER" && parts.size() >= 4)
+            else if (parts[0] == "WHISPER" && parts.size() >= 3)
             {
                 if (nickname_.empty())
                 {
@@ -1064,22 +1388,17 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                if (parts[1] != nickname_)
-                {
-                    deliver("[system] Ignored whisper with mismatched sender");
-                    read_loop();
-                    return;
-                }
-
-                std::string message = join_fields(parts, 3, '|');
-                if (!is_valid_nickname(parts[2]) || !is_valid_chat_message(message))
+                const bool old_format = parts.size() >= 4 && parts[1] == nickname_;
+                const std::string& target = old_format ? parts[2] : parts[1];
+                std::string message = join_fields(parts, old_format ? 3 : 2, '|');
+                if (!is_valid_nickname(target) || !is_valid_chat_message(message))
                 {
                     deliver("[system] Invalid whisper target or message");
                     read_loop();
                     return;
                 }
 
-                server_.send_private(nickname_, parts[2], message);
+                server_.send_private(nickname_, target, message);
             }
             else
             {
@@ -1211,6 +1530,24 @@ public:
             });
     }
 
+    void set_identity(const ClientIdentity& identity)
+    {
+        identity_ = identity;
+    }
+
+    void identify(const std::string& nick)
+    {
+        if (!identity_)
+        {
+            join_resolved_ = true;
+            join_failed_ = true;
+            join_failure_reason_ = "No local identity key loaded";
+            return;
+        }
+
+        send("IDENTIFY|" + nick + "|" + identity_->public_key_hex);
+    }
+
     void close()
     {
         closing_ = true;
@@ -1318,6 +1655,26 @@ private:
                 {
                     join_resolved_ = true;
                 }
+                else if (decoded.rfind("CHALLENGE|", 0) == 0)
+                {
+                    auto parts = split(decoded, '|');
+                    if (parts.size() >= 2 && identity_)
+                    {
+                        send("PROOF|" + sign_identity_challenge(*identity_, parts[1]));
+                    }
+                    else
+                    {
+                        join_resolved_ = true;
+                        join_failed_ = true;
+                        join_failure_reason_ = "Identity challenge could not be answered";
+                    }
+                }
+                else if (decoded.rfind("IDENTITY_OK|", 0) == 0)
+                {
+                    auto parts = split(decoded, '|');
+                    if (parts.size() >= 2)
+                        push_message("[system] Identity verified: " + parts[1]);
+                }
                 else if (decoded == "BANNED")
                 {
                     join_resolved_ = true;
@@ -1379,6 +1736,7 @@ private:
     std::atomic<bool> nickname_taken_{ false };
     std::atomic<bool> join_failed_{ false };
     std::atomic<bool> closing_{ false };
+    std::optional<ClientIdentity> identity_;
     std::string       kick_reason_;
     std::string       join_failure_reason_;
     bool              close_after_write_ = false;
@@ -1515,6 +1873,7 @@ struct DedicatedServerConfig
     std::string password;
     std::string logfile = "chatlog.txt";
     std::string bans_file = "bans.txt";
+    std::string identities_file = "identities.txt";
     bool enable_logging = true;
     bool log_to_stdout_only = false;
     bool enable_upnp = true;
@@ -1529,6 +1888,7 @@ void show_dedicated_usage()
         << "Options:\n"
         << "  --password <password>  - set the room password\n"
         << "  --log <file>           - write logs to a file\n"
+        << "  --identities <file>    - store nickname identity keys in a file\n"
         << "  --log-stdout           - print logs only to stdout\n"
         << "  --no-log               - disable chat logging\n"
         << "  --no-upnp              - skip UPnP port forwarding\n\n"
@@ -1664,6 +2024,7 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
 
     boost::asio::io_context io;
     ChatServer server(io, config.port, config.password, log.get());
+    server.load_identities(config.identities_file);
     server.load_bans(config.bans_file);
 
     UPnPMapper upnp;
@@ -1715,6 +2076,7 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     else
         std::cout << config.logfile;
     std::cout << " | Bans: " << config.bans_file << "\n";
+    std::cout << "Identities: " << config.identities_file << "\n";
 
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
@@ -1778,12 +2140,16 @@ int run_dedicated_server(int argc, char* argv[])
             config.log_to_stdout_only = false;
             positional_log_set = true;
         }
+        else if (arg == "--identities" && i + 1 < argc)
+        {
+            config.identities_file = argv[++i];
+        }
         else if (arg == "--help" || arg == "-h")
         {
             show_dedicated_usage();
             return 0;
         }
-        else if (arg == "--password" || arg == "--log")
+        else if (arg == "--password" || arg == "--log" || arg == "--identities")
         {
             std::cerr << arg << " requires a value\n";
             show_dedicated_usage();
@@ -1822,6 +2188,12 @@ int run_dedicated_server(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
+    if (sodium_init() < 0)
+    {
+        std::cerr << "Failed to initialize libsodium\n";
+        return 1;
+    }
+
     if (argc >= 2)
     {
         std::string mode = argv[1];
@@ -1970,6 +2342,17 @@ int main(int argc, char* argv[])
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
+    ClientIdentity local_identity;
+    bool identity_created = false;
+    if (!load_or_create_identity(g_nickname, local_identity, identity_created))
+    {
+        endwin();
+        std::cerr << "Could not load or create local identity key for " << g_nickname << "\n";
+        return 1;
+    }
+    push_message("[system] " + std::string(identity_created ? "Created" : "Loaded")
+        + " local identity " + identity_fingerprint(local_identity.public_key_hex));
+
     // =========================================
     // Main menu
     // =========================================
@@ -2033,9 +2416,20 @@ int main(int argc, char* argv[])
                     room_password,
                     nullptr,
                     g_nickname);
+                server->load_identities("identities.txt");
+                if (!server->register_local_identity(g_nickname, local_identity.public_key_hex))
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Your nickname is registered to another identity key.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                    server.reset();
+                    continue;
+                }
 
                 add_user(g_nickname);
                 push_message("[system] Hosting on port " + std::to_string(port));
+                push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
 
                 if (!room_password.empty())
                     push_message("[system] Room password protection enabled");
@@ -2135,6 +2529,7 @@ int main(int argc, char* argv[])
                 }
 
                 client = std::make_unique<ChatClient>(io);
+                client->set_identity(local_identity);
 
                 if (!client->connect(host_buf, port))
                 {
@@ -2180,8 +2575,8 @@ int main(int argc, char* argv[])
                     }
                 }
 
-                // Check ban before joining
-                client->send("JOIN|" + g_nickname);
+                // Prove nickname identity before joining.
+                client->identify(g_nickname);
                 for (int i = 0; i < 50 && !client->join_resolved(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -2229,6 +2624,7 @@ int main(int argc, char* argv[])
 
                 add_user(g_nickname);
                 push_message("[system] Connected to " + std::string(host_buf));
+                push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
                 configured = true;
 
                 timeout(30);
@@ -2294,7 +2690,7 @@ int main(int argc, char* argv[])
                                         {
                                             std::string target = cmd->args[0];
                                             std::string message = input.substr(cmd_end + 1);
-                                            client->send("WHISPER|" + g_nickname + "|" + target + "|" + message);
+                                            client->send("WHISPER|" + target + "|" + message);
                                         }
                                     }
                                 }
@@ -2309,7 +2705,7 @@ int main(int argc, char* argv[])
                             }
                             else
                             {
-                                client->send("MSG|" + g_nickname + "|" + input);
+                                client->send("MSG|" + input);
                             }
 
                             input.clear();
@@ -2332,7 +2728,7 @@ int main(int argc, char* argv[])
 
                 // Shutdown client
                 if (!g_kicked)
-                    client->send("LEAVE|" + g_nickname);
+                    client->send("LEAVE");
                 client->close();
                 if (network_thread.joinable())
                     network_thread.join();
