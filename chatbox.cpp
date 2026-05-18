@@ -5,15 +5,17 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 
 /*
-Todo: (absolutely not in order of importance)
-- add real end-to-end encryption instead of base64 "obfuscation" (probably NaCl/libsodium)
-- add gui for beta release instead of ncurses (Qt, Dear ImGui, or similar)
-- regret everything
-- linux support (is possible, but im lazy)
-- terrorize the rust programmers by throwing rusted cans at them
-- add file transfer for beta release, something like a mini torrent or ftp server and client so i dont have to write it myself)
-- find a way to put the numbers 27 in an important place in the codebase to further fuel my ego
-- clean up codebase and seperate into multiple files instead of one giant cpp file
+Todo: 
+- Add command-line options for server mode (e.g. listen port, password, log file, etc)
+- Add support for private messages between users
+- Add support for multiple chat rooms (currently only one global room)
+- Add better error handling and edge case handling (e.g. malformed messages, etc)
+- Add rate limiting to prevent spam (e.g. max messages per minute)
+- Add option to disable UPnP port forwarding (currently always tries and may cause issues on some networks)
+- Add option to disable logging (or log to stdout only)
+- Add option to disable admin console (or add password protection for it)
+- Add more admin commands (e.g. kick user, ban user, list users, etc)
+- Regret life.
 */
 
 // needs vcpkg my beloved
