@@ -1,136 +1,170 @@
 # chatbox
 
-A terminal-based P2P chat application written in C++. One peer hosts a server, others join directly — no central server required. Supports multiple simultaneous clients, private messages, a live user list, and automatic port forwarding via UPnP.
+`chatbox.cpp` is a C++20 terminal chat application with a curses-style UI, TCP networking through Boost.Asio, and automatic UPnP port mapping through miniupnpc. It can run as an interactive chat client, an embedded host, or a dedicated server.
 
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
-![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC--BY--NC--SA--4-green
-)
-
----
+![Boost.Asio](https://img.shields.io/badge/networking-Boost.Asio-blue)
+![PDCurses](https://img.shields.io/badge/UI-PDCurses-green)
+![miniupnpc](https://img.shields.io/badge/UPnP-miniupnpc-orange)
+![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC--BY--NC--SA--4.0-green)
 
 ## Features
 
-- **Host or join** — one peer hosts, any number of others connect directly
-- **Automatic port forwarding** — UPnP opens the port on your router and displays your external IP automatically
-- **Live user list** — sidebar panel updates in real time as people join and leave
-- **Private messages** — `/whisper <nick> <message>` for direct messages
-- **Timestamps** — every message is timestamped `[HH:MM:SS]`
-- **Terminal UI** — split-pane ncurses interface (chat, users, input)
-- **Cross-platform** — Linux, macOS, and Windows (with PDCurses)
-
----
+- Host or join a TCP chat room from the terminal
+- Run a headless dedicated server from the menu or command line
+- Optional room password on hosted and dedicated rooms
+- Live user list in a split-pane terminal interface
+- Public messages and labeled private-message commands
+- Host and dedicated-server moderation commands: kick, ban, unban, and list bans
+- Dedicated-server logging to `chatlog.txt` by default
+- Dedicated-server ban persistence in `bans.txt`
+- Automatic UPnP port mapping with fallback LAN address display
+- Base64 message framing for simple line-safe transport
 
 ## Dependencies
 
 | Library | Purpose |
-|---|---|
-| [Boost.Asio](https://www.boost.org/doc/libs/release/libs/asio/) | Async TCP networking |
-| [ncurses](https://invisible-island.net/ncurses/) / PDCurses (Windows) | Terminal UI |
-| [miniupnpc](https://miniupnp.tuxfamily.org/) | UPnP automatic port mapping |
+| --- | --- |
+| [Boost.Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html) | TCP client/server networking |
+| [PDCurses](https://pdcurses.org/) | Terminal UI on Windows |
+| [miniupnpc](https://miniupnp.tuxfamily.org/) | UPnP router discovery and port mapping |
 
----
+The current CMake project is set up for vcpkg and PDCurses. The source uses a curses-style API, but the checked-in build configuration is Windows-focused.
 
 ## Building
 
-### 1. Install vcpkg (if you haven't)
+Install vcpkg first if it is not already available:
 
-```bash
-git clone https://github.com/microsoft/vcpkg
-cd vcpkg && ./bootstrap-vcpkg.sh   # or bootstrap-vcpkg.bat on Windows
-export VCPKG_ROOT=$(pwd)
+```powershell
+git clone https://github.com/microsoft/vcpkg "$env:USERPROFILE\vcpkg"
+& "$env:USERPROFILE\vcpkg\bootstrap-vcpkg.bat"
+$env:VCPKG_ROOT = "$env:USERPROFILE\vcpkg"
 ```
 
-### 2. Configure and build
+Then configure and build with one of the checked-in presets:
 
-```bash
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
-cmake --build build
+```powershell
+cmake --preset x64-debug
+cmake --build out/build/x64-debug
 ```
 
-vcpkg will automatically install all dependencies from `vcpkg.json` on the first run.
+The first CMake configure uses `vcpkg.json` to restore the required packages. The checked-in CMake file has a Windows default vcpkg path; if your checkout is somewhere else, pass the toolchain file explicitly:
 
-### CMakePresets (optional)
-
-If you add a `CMakePresets.json`, you can shorten this to:
-
-```bash
-cmake --preset default
-cmake --build build
+```powershell
+cmake -S . -B out/build/manual -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+cmake --build out/build/manual
 ```
 
----
+The main target is `chatbox`, built from `chatbox.cpp`. The repository also includes a separate `chatbox_server` target built from `chatbox_server.cpp`.
 
-## Usage
+## Running
 
-Run the binary:
+Start the full terminal app:
 
-```bash
-./build/chatbox
+```powershell
+.\out\build\x64-debug\chatbox.exe
 ```
 
-You'll be prompted for a nickname, then:
+At startup:
 
-- Press **H** to host — enter a port number. UPnP will attempt to open it on your router and print your external IP:port to share with your peer.
-- Press **J** to join — enter the host's IP and port.
+| Key | Mode |
+| --- | --- |
+| `C` | Chat mode: choose whether to host or join |
+| `D` | Dedicated server mode |
+| `Q` | Quit |
 
-### In chat
+In chat mode, enter a nickname first. Then:
 
 | Key | Action |
-|---|---|
-| `Enter` | Send message |
-| `Backspace` | Delete character |
-| `Escape` | Quit |
+| --- | --- |
+| `H` | Host a room on a port and optionally set a room password |
+| `J` | Join an existing host by address and port |
+| `Q` | Quit before connecting |
 
-### Commands
+When hosting, chatbox attempts UPnP port mapping, prints an external address when available, and also lists LAN addresses. If UPnP is unavailable, manually forward the selected port for internet clients.
+
+In chat:
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send the current message or command |
+| `Backspace` | Delete one character |
+| `Escape` | Leave the current chat session |
+
+## Dedicated Server
+
+You can start dedicated mode from the startup menu or directly from the command line:
+
+```powershell
+.\out\build\x64-debug\chatbox.exe --server <port> [password] [logfile]
+.\out\build\x64-debug\chatbox.exe --dedicated <port> [password] [logfile]
+.\out\build\x64-debug\chatbox.exe -s <port> [password] [logfile]
+```
+
+If no log file is supplied, the server writes to `chatlog.txt`. Bans are persisted in `bans.txt`.
+
+Dedicated-server console commands:
 
 | Command | Description |
-|---|---|
-| `/help` | Show all commands |
+| --- | --- |
+| `/help` | Show dedicated-server help |
 | `/users` | List connected users |
-| `/whisper <nick> <msg>` | Send a private message (client only) |
-| `/clear` | Clear message history |
-| `/time` | Show current time |
-| `/exit` | Quit |
+| `/kick <nick> [reason]` | Disconnect a user |
+| `/ban <nick> [reason]` | Ban a nickname and persist it |
+| `/unban <nick>` | Remove a persisted ban |
+| `/bans` | List banned nicknames |
+| `/broadcast <message>` | Send a server announcement |
+| `/quit` or `/exit` | Shut down the server |
 
----
+## Chat Commands
 
-## UPnP / Port Forwarding
+Commands available to connected chat users:
 
-When hosting, chatbox will:
+| Command | Description |
+| --- | --- |
+| `/help` | Show available commands |
+| `/users` | List connected users |
+| `/whisper <nick> <message>` | Send a labeled private message |
+| `/clear` | Clear the local message window |
+| `/time` | Show the current local time |
+| `/exit` | Leave the room |
 
-1. Discover your router via UPnP
-2. Open the chosen port (TCP + UDP) automatically
-3. Print your external IP:port in the chat log — share this with whoever is connecting
+Additional commands available when you are the interactive host:
 
-If UPnP is unavailable or disabled on your router, the app will tell you and fall back to showing your LAN addresses. In that case you'll need to forward the port manually in your router settings.
+| Command | Description |
+| --- | --- |
+| `/kick <nick> [reason]` | Disconnect a user |
+| `/ban <nick> [reason]` | Ban a nickname for the current host session |
+| `/unban <nick>` | Remove a nickname from the current host session ban list |
+| `/bans` | Show the current host session ban list |
 
-> **Note:** UPnP only works on your local network — it talks to your router, not the internet. If your router doesn't support it, you'll see a "UPnP unavailable" message. Most home routers have it enabled by default.
+## Security Notes
 
----
+Messages and protocol frames are Base64-encoded before being sent over TCP. Base64 is not encryption. Room passwords are also transported inside that same encoded protocol, so this is suitable for trusted LANs or casual testing, not sensitive communication over untrusted networks.
 
-## Security
-
-Messages are currently encoded with Base64, which is **not encryption** — anyone who can intercept the TCP stream can read the traffic trivially. This is fine for LAN use between trusted peers, but should not be used for anything sensitive over the internet.
-
-A future improvement would be to wrap the connection in TLS using `boost::asio::ssl` with a self-signed certificate pinned on both ends.
-
----
+For real privacy, the networking layer would need authenticated encryption such as TLS or a libsodium-style key exchange and message encryption scheme.
 
 ## Project Structure
 
-```
+```text
 chatbox/
-├── chatbox.cpp      # Everything — UPnP, server, client, UI, commands
-├── vcpkg.json       # Dependency manifest
-├── CMakeLists.txt   # Build configuration
-└── README.md
+|-- chatbox.cpp         # Full terminal app: client, embedded host, dedicated mode, UI, UPnP
+|-- chatbox_server.cpp  # Separate headless server target
+|-- CMakeLists.txt      # Build configuration
+|-- CMakePresets.json   # Windows/Linux/macOS configure presets
+|-- vcpkg.json          # Dependency manifest
+`-- readme.md
 ```
-
----
 
 ## Known Limitations
 
-- Whisper messages are broadcast to all connected clients by the server (no true end-to-end routing yet)
-- No message history persistence — chat log is lost on exit
-- No encryption
-- Only one active connection per client instance
+- `/whisper` messages are labeled as private, but the server currently broadcasts them to clients rather than doing true end-to-end private routing.
+- There is no cryptographic encryption or authentication.
+- Interactive-host bans are session-only; dedicated-server bans persist in `bans.txt`.
+- Duplicate nicknames are not rejected.
+- Message history is not persisted for normal chat sessions.
+- The checked-in CMake setup is primarily configured for Windows with PDCurses.
+
+## License
+
+CC BY-NC-SA 4.0. See the header in `chatbox.cpp` for the current project notice.

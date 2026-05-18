@@ -40,14 +40,6 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET chatbox PROPERTY CXX_STANDARD 20)
 endif()
 
-# =====================================================
-# chatbox_server  (headless dedicated server, no ncurses)
-# =====================================================
-add_executable(chatbox_server "chatbox_server.cpp")
-
-target_link_libraries(chatbox_server PRIVATE Boost::asio)
-target_link_libraries(chatbox_server PRIVATE miniupnpc::miniupnpc)
-
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET chatbox_server PROPERTY CXX_STANDARD 20)
 endif()

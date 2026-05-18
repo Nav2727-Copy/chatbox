@@ -27,6 +27,7 @@ Todo: (absolutely not in order of importance)
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <fstream>
 #include <format>
 #include <iostream>
 #include <memory>
@@ -178,10 +179,12 @@ constexpr int NICKNAME_BUF_SIZE = 32;
 constexpr int HOST_BUF_SIZE = 64;
 constexpr int PORT_BUF_SIZE = 16;
 constexpr int PASS_BUF_SIZE = 64;
+constexpr int LOGFILE_BUF_SIZE = 260;
 constexpr int NICK_MAX_LEN = 31;
 constexpr int HOST_MAX_LEN = 63;
 constexpr int PORT_MAX_LEN = 15;
 constexpr int PASS_MAX_LEN = 63;
+constexpr int LOGFILE_MAX_LEN = 259;
 
 std::string g_nickname;
 
@@ -292,6 +295,18 @@ std::vector<std::string> split(const std::string& s, char delim)
     return out;
 }
 
+std::string join_fields(const std::vector<std::string>& fields, size_t start, char delim)
+{
+    std::string out;
+    for (size_t i = start; i < fields.size(); ++i)
+    {
+        if (i > start)
+            out += delim;
+        out += fields[i];
+    }
+    return out;
+}
+
 void push_message(const std::string& msg)
 {
     std::lock_guard lock(g_mutex);
@@ -314,6 +329,55 @@ void remove_user(const std::string& user)
         std::remove(g_users.begin(), g_users.end(), user),
         g_users.end());
 }
+
+std::vector<std::string> connected_users()
+{
+    std::lock_guard lock(g_mutex);
+    return g_users;
+}
+
+// =====================================================
+// Chat log
+// =====================================================
+
+class ChatLog
+{
+public:
+    explicit ChatLog(const std::string& path)
+        : path_(path)
+    {
+        file_.open(path_, std::ios::app);
+        if (file_.is_open())
+            write("=== Server started ===");
+        else
+            std::cerr << "[warn] Could not open log file: " << path_ << "\n";
+    }
+
+    ~ChatLog()
+    {
+        if (file_.is_open())
+        {
+            write("=== Server stopped ===");
+            file_.close();
+        }
+    }
+
+    void write(const std::string& line)
+    {
+        std::lock_guard lock(mutex_);
+        if (file_.is_open())
+        {
+            file_ << "[" << timestamp() << "] " << line << "\n";
+            file_.flush();
+        }
+        std::cout << "[log] " << line << "\n";
+    }
+
+private:
+    std::string path_;
+    std::ofstream file_;
+    std::mutex mutex_;
+};
 
 // =====================================================
 // Command handling
@@ -370,18 +434,23 @@ public:
 
     void start();
     void deliver(const std::string& msg);
+    void close();
 
     // The nickname is set once AUTH/JOIN is accepted
     const std::string& nickname() const { return nickname_; }
 
 private:
     void read_loop();
+    void write_next();
 
     tcp::socket   socket_;
     ChatServer& server_;
     boost::asio::streambuf buffer_;
+    std::deque<std::string> write_queue_;
     std::string   nickname_;
     bool          authenticated_ = false;   // true after password accepted
+    bool          close_after_write_ = false;
+    bool          suppress_leave_notice_ = false;
 };
 
 // =====================================================
@@ -392,8 +461,8 @@ class ChatServer
 {
 public:
     ChatServer(boost::asio::io_context& io, uint16_t port,
-        const std::string& password = "")
-        : acceptor_(io), password_(password)
+        const std::string& password = "", ChatLog* log = nullptr)
+        : io_(io), acceptor_(io), password_(password), log_(log)
     {
         tcp::endpoint endpoint(tcp::v6(), port);
         acceptor_.open(endpoint.protocol());
@@ -432,9 +501,22 @@ public:
     void broadcast(const std::string& msg)
     {
         push_message(msg);
-        std::lock_guard lock(sessions_mutex_);
-        for (auto& s : sessions_)
+        if (log_)
+            log_->write(msg);
+
+        std::vector<std::shared_ptr<ClientSession>> sessions;
+        {
+            std::lock_guard lock(sessions_mutex_);
+            sessions.assign(sessions_.begin(), sessions_.end());
+        }
+
+        for (auto& s : sessions)
             s->deliver(msg);
+    }
+
+    void broadcast_server(const std::string& msg)
+    {
+        broadcast("[SERVER] " + msg);
     }
 
     void broadcast_users()
@@ -450,9 +532,35 @@ public:
                 first = false;
             }
         }
-        std::lock_guard lock(sessions_mutex_);
-        for (auto& s : sessions_)
+
+        std::vector<std::shared_ptr<ClientSession>> sessions;
+        {
+            std::lock_guard lock(sessions_mutex_);
+            sessions.assign(sessions_.begin(), sessions_.end());
+        }
+
+        for (auto& s : sessions)
             s->deliver(payload);
+    }
+
+    void stop()
+    {
+        boost::asio::post(io_,
+            [this]
+            {
+                boost::system::error_code ignored;
+                acceptor_.close(ignored);
+            });
+
+        std::vector<std::shared_ptr<ClientSession>> sessions;
+        {
+            std::lock_guard lock(sessions_mutex_);
+            sessions.assign(sessions_.begin(), sessions_.end());
+            sessions_.clear();
+        }
+
+        for (auto& s : sessions)
+            s->close();
     }
 
     // Kick a user by nickname: send KICK message to that session then drop it.
@@ -480,9 +588,7 @@ public:
             kick_msg += "|" + reason;
 
         target->deliver(kick_msg);
-
-        // Give the message a moment to flush, then forcibly drop the session
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        target->close();
         leave(target);
         remove_user(nick);
         broadcast("[system] " + nick + " was kicked"
@@ -498,20 +604,66 @@ public:
             std::lock_guard lock(ban_mutex_);
             banned_nicks_.insert(nick);
         }
+        save_bans();
         // If they're currently connected, kick them too
         kick_user(nick, reason.empty() ? "banned" : reason);
         broadcast("[system] " + nick + " has been banned");
+        if (log_)
+            log_->write("[admin] Banned: " + nick + (reason.empty() ? "" : " (" + reason + ")"));
         return true;
     }
 
     // Unban a user
     bool unban_user(const std::string& nick)
     {
-        std::lock_guard lock(ban_mutex_);
-        return banned_nicks_.erase(nick) > 0;
+        bool removed = false;
+        {
+            std::lock_guard lock(ban_mutex_);
+            removed = banned_nicks_.erase(nick) > 0;
+        }
+
+        if (removed)
+        {
+            save_bans();
+            if (log_)
+                log_->write("[admin] Unbanned: " + nick);
+        }
+
+        return removed;
     }
 
-    const std::set<std::string>& ban_list() const { return banned_nicks_; }
+    void load_bans(const std::string& path)
+    {
+        bans_file_ = path;
+
+        std::ifstream file(path);
+        if (!file.is_open())
+            return;
+
+        std::string nick;
+        {
+            std::lock_guard lock(ban_mutex_);
+            while (std::getline(file, nick))
+            {
+                if (!nick.empty())
+                    banned_nicks_.insert(nick);
+            }
+        }
+
+        if (log_)
+            log_->write("[admin] Loaded " + std::to_string(ban_list().size()) + " ban(s) from " + path);
+    }
+
+    std::set<std::string> ban_list() const
+    {
+        std::lock_guard lock(ban_mutex_);
+        return banned_nicks_;
+    }
+
+    std::vector<std::string> connected_users() const
+    {
+        return ::connected_users();
+    }
 
 private:
     void accept_loop()
@@ -526,12 +678,28 @@ private:
                     join(session);
                     session->start();
                 }
-                accept_loop();
+
+                if (acceptor_.is_open())
+                    accept_loop();
             });
     }
 
+    void save_bans()
+    {
+        if (bans_file_.empty())
+            return;
+
+        auto bans = ban_list();
+        std::ofstream file(bans_file_, std::ios::trunc);
+        for (const auto& nick : bans)
+            file << nick << "\n";
+    }
+
+    boost::asio::io_context& io_;
     tcp::acceptor acceptor_;
     std::string   password_;
+    ChatLog*      log_ = nullptr;
+    std::string   bans_file_;
 
     mutable std::mutex sessions_mutex_;
     std::set<std::shared_ptr<ClientSession>> sessions_;
@@ -546,9 +714,10 @@ private:
 
 void ClientSession::start()
 {
-    // If there's a password, ask for it first
     if (server_.has_password())
         deliver("AUTH_REQUIRED");
+    else
+        deliver("AUTH_OK");
 
     read_loop();
 }
@@ -564,7 +733,7 @@ void ClientSession::read_loop()
             if (ec)
             {
                 server_.leave(self);
-                if (!nickname_.empty())
+                if (!nickname_.empty() && !suppress_leave_notice_)
                 {
                     remove_user(nickname_);
                     server_.broadcast("[system] " + nickname_ + " left");
@@ -597,9 +766,9 @@ void ClientSession::read_loop()
                 else
                 {
                     deliver("AUTH_FAIL");
-                    // Close connection after a short delay
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    close();
                     server_.leave(self);
+                    return;
                 }
                 read_loop();
                 return;
@@ -621,12 +790,14 @@ void ClientSession::read_loop()
                 if (server_.is_banned(nick))
                 {
                     deliver("BANNED");
+                    close();
                     server_.leave(self);
                     return;
                 }
 
                 nickname_ = nick;
                 add_user(nickname_);
+                deliver("JOIN_OK");
                 server_.broadcast("[system] " + nickname_ + " joined");
                 server_.broadcast_users();
             }
@@ -636,19 +807,21 @@ void ClientSession::read_loop()
                 remove_user(parts[1]);
                 server_.broadcast("[system] " + parts[1] + " left");
                 server_.broadcast_users();
+                if (nickname_ == parts[1])
+                    nickname_.clear();
             }
             // ---- MSG ----
             else if (parts[0] == "MSG" && parts.size() >= 3)
             {
                 server_.broadcast(
-                    "[" + timestamp() + "] " + parts[1] + ": " + parts[2]);
+                    "[" + timestamp() + "] " + parts[1] + ": " + join_fields(parts, 2, '|'));
             }
             // ---- WHISPER ----
             else if (parts[0] == "WHISPER" && parts.size() >= 4)
             {
                 server_.broadcast(
                     "[PRIVATE " + timestamp() + "] "
-                    + parts[1] + " -> " + parts[2] + ": " + parts[3]);
+                    + parts[1] + " -> " + parts[2] + ": " + join_fields(parts, 3, '|'));
             }
 
             read_loop();
@@ -658,14 +831,64 @@ void ClientSession::read_loop()
 void ClientSession::deliver(const std::string& msg)
 {
     auto self = shared_from_this();
-    auto data = std::make_shared<std::string>(encode_base64(msg) + "\n");
+    boost::asio::post(
+        socket_.get_executor(),
+        [this, self, msg]
+        {
+            const bool writing = !write_queue_.empty();
+            write_queue_.push_back(encode_base64(msg) + "\n");
+            if (!writing)
+                write_next();
+        });
+}
 
+void ClientSession::write_next()
+{
+    auto self = shared_from_this();
     boost::asio::async_write(
-        socket_, boost::asio::buffer(*data),
-        [data, self](boost::system::error_code ec, std::size_t)
+        socket_, boost::asio::buffer(write_queue_.front()),
+        [this, self](boost::system::error_code ec, std::size_t)
         {
             if (ec)
-                std::cerr << "Write error: " << ec.message() << "\n";
+            {
+                if (ec != boost::asio::error::operation_aborted)
+                    std::cerr << "Write error: " << ec.message() << "\n";
+                return;
+            }
+
+            write_queue_.pop_front();
+            if (!write_queue_.empty())
+            {
+                write_next();
+                return;
+            }
+
+            if (close_after_write_)
+            {
+                boost::system::error_code ignored;
+                socket_.shutdown(tcp::socket::shutdown_both, ignored);
+                socket_.close(ignored);
+            }
+        });
+}
+
+void ClientSession::close()
+{
+    auto self = shared_from_this();
+    boost::asio::post(
+        socket_.get_executor(),
+        [this, self]
+        {
+            suppress_leave_notice_ = true;
+            if (!write_queue_.empty())
+            {
+                close_after_write_ = true;
+                return;
+            }
+
+            boost::system::error_code ignored;
+            socket_.shutdown(tcp::socket::shutdown_both, ignored);
+            socket_.close(ignored);
         });
 }
 
@@ -704,16 +927,29 @@ public:
             socket_.get_executor(),
             [this, msg]
             {
-                auto data = std::make_shared<std::string>(
-                    encode_base64(msg) + "\n");
+                const bool writing = !write_queue_.empty();
+                write_queue_.push_back(encode_base64(msg) + "\n");
+                if (!writing)
+                    write_next();
+            });
+    }
 
-                boost::asio::async_write(
-                    socket_, boost::asio::buffer(*data),
-                    [data](boost::system::error_code ec, std::size_t)
-                    {
-                        if (ec)
-                            std::cerr << "Send error: " << ec.message() << "\n";
-                    });
+    void close()
+    {
+        closing_ = true;
+        boost::asio::post(
+            socket_.get_executor(),
+            [this]
+            {
+                if (!write_queue_.empty())
+                {
+                    close_after_write_ = true;
+                    return;
+                }
+
+                boost::system::error_code ignored;
+                socket_.shutdown(tcp::socket::shutdown_both, ignored);
+                socket_.close(ignored);
             });
     }
 
@@ -721,11 +957,41 @@ public:
     bool auth_required()       const { return auth_required_; }
     bool auth_resolved()       const { return auth_resolved_; }
     bool auth_ok()             const { return auth_ok_; }
+    bool join_resolved()       const { return join_resolved_; }
     bool was_kicked()          const { return kicked_; }
     bool was_banned()          const { return banned_; }
     const std::string& kick_reason() const { return kick_reason_; }
 
 private:
+    void write_next()
+    {
+        boost::asio::async_write(
+            socket_, boost::asio::buffer(write_queue_.front()),
+            [this](boost::system::error_code ec, std::size_t)
+            {
+                if (ec)
+                {
+                    if (ec != boost::asio::error::operation_aborted && !closing_)
+                        std::cerr << "Send error: " << ec.message() << "\n";
+                    return;
+                }
+
+                write_queue_.pop_front();
+                if (!write_queue_.empty())
+                {
+                    write_next();
+                    return;
+                }
+
+                if (close_after_write_)
+                {
+                    boost::system::error_code ignored;
+                    socket_.shutdown(tcp::socket::shutdown_both, ignored);
+                    socket_.close(ignored);
+                }
+            });
+    }
+
     void read_loop()
     {
         boost::asio::async_read_until(
@@ -734,7 +1000,8 @@ private:
             {
                 if (ec)
                 {
-                    push_message("[system] disconnected");
+                    if (!closing_ && !kicked_ && !banned_ && auth_ok_)
+                        push_message("[system] disconnected");
                     return;
                 }
 
@@ -760,8 +1027,13 @@ private:
                     auth_ok_ = false;
                     push_message("[system] Wrong password - disconnected");
                 }
+                else if (decoded == "JOIN_OK")
+                {
+                    join_resolved_ = true;
+                }
                 else if (decoded == "BANNED")
                 {
+                    join_resolved_ = true;
                     banned_ = true;
                     push_message("[system] You are banned from this server");
                 }
@@ -770,7 +1042,7 @@ private:
                     kicked_ = true;
                     auto parts = split(decoded, '|');
                     if (parts.size() >= 3)
-                        kick_reason_ = parts[2];
+                        kick_reason_ = join_fields(parts, 2, '|');
                     push_message("[system] You have been kicked"
                         + (kick_reason_.empty() ? "" : ": " + kick_reason_));
                     g_kicked = true;   // signal main loop
@@ -795,13 +1067,17 @@ private:
 
     tcp::socket            socket_;
     boost::asio::streambuf buffer_;
+    std::deque<std::string> write_queue_;
 
     std::atomic<bool> auth_required_{ false };
     std::atomic<bool> auth_resolved_{ false };
     std::atomic<bool> auth_ok_{ false };
+    std::atomic<bool> join_resolved_{ false };
     std::atomic<bool> kicked_{ false };
     std::atomic<bool> banned_{ false };
+    std::atomic<bool> closing_{ false };
     std::string       kick_reason_;
+    bool              close_after_write_ = false;
 };
 
 // =====================================================
@@ -909,11 +1185,231 @@ std::string prompt_password(int row, int col, const char* label)
 }
 
 // =====================================================
+// Dedicated server mode
+// =====================================================
+
+void show_dedicated_usage()
+{
+    std::cout
+        << "Usage:\n"
+        << "  chatbox --server <port> [password] [logfile]\n"
+        << "  chatbox --dedicated <port> [password] [logfile]\n\n"
+        << "Dedicated server admin commands:\n"
+        << "  /kick <nick> [reason]  - kick a connected user\n"
+        << "  /ban  <nick> [reason]  - ban a user and persist it\n"
+        << "  /unban <nick>          - remove a persisted ban\n"
+        << "  /bans                  - list banned nicknames\n"
+        << "  /users                 - list connected users\n"
+        << "  /broadcast <msg>       - send a server announcement\n"
+        << "  /quit                  - shut down the server\n"
+        << "  /help                  - show this help\n";
+}
+
+std::string join_args(const std::vector<std::string>& args, size_t start)
+{
+    return join_fields(args, start, ' ');
+}
+
+bool parse_port(const std::string& text, uint16_t& port)
+{
+    try
+    {
+        size_t consumed = 0;
+        int value = std::stoi(text, &consumed);
+        if (consumed != text.size() || value < 0 || value > 65535)
+            return false;
+
+        port = static_cast<uint16_t>(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
+{
+    show_dedicated_usage();
+
+    std::string line;
+    while (!quit_flag && std::getline(std::cin, line))
+    {
+        if (line.empty())
+            continue;
+
+        auto parts = split(line, ' ');
+        if (parts.empty())
+            continue;
+
+        const std::string& cmd = parts[0];
+
+        if (cmd == "/quit" || cmd == "/exit")
+        {
+            quit_flag = true;
+            break;
+        }
+        else if (cmd == "/help")
+        {
+            show_dedicated_usage();
+        }
+        else if (cmd == "/users")
+        {
+            auto users = server.connected_users();
+            if (users.empty())
+                std::cout << "(no users connected)\n";
+            else
+                for (const auto& user : users)
+                    std::cout << "  - " << user << "\n";
+        }
+        else if (cmd == "/kick" && parts.size() >= 2)
+        {
+            std::string reason = join_args(parts, 2);
+            if (server.kick_user(parts[1], reason))
+                std::cout << "Kicked: " << parts[1] << "\n";
+            else
+                std::cout << "User not found: " << parts[1] << "\n";
+        }
+        else if (cmd == "/ban" && parts.size() >= 2)
+        {
+            server.ban_user(parts[1], join_args(parts, 2));
+            std::cout << "Banned: " << parts[1] << "\n";
+        }
+        else if (cmd == "/unban" && parts.size() >= 2)
+        {
+            if (server.unban_user(parts[1]))
+                std::cout << "Unbanned: " << parts[1] << "\n";
+            else
+                std::cout << "Not in ban list: " << parts[1] << "\n";
+        }
+        else if (cmd == "/bans")
+        {
+            auto bans = server.ban_list();
+            if (bans.empty())
+                std::cout << "(ban list is empty)\n";
+            else
+                for (const auto& nick : bans)
+                    std::cout << "  - " << nick << "\n";
+        }
+        else if (cmd == "/broadcast" && parts.size() >= 2)
+        {
+            server.broadcast_server(join_args(parts, 1));
+        }
+        else
+        {
+            std::cout << "Unknown command. Type /help for a list.\n";
+        }
+    }
+}
+
+int run_dedicated_server_config(uint16_t port,
+    const std::string& password,
+    const std::string& logfile)
+{
+    std::string bans_file = "bans.txt";
+
+    ChatLog log(logfile);
+    log.write("[admin] Starting dedicated server on port " + std::to_string(port));
+    if (!password.empty())
+        log.write("[admin] Password protection enabled");
+
+    boost::asio::io_context io;
+    ChatServer server(io, port, password, &log);
+    server.load_bans(bans_file);
+
+    UPnPMapper upnp;
+    if (upnp.discover())
+    {
+        if (upnp.openPortBoth(std::to_string(port), "chatbox dedicated server"))
+        {
+            log.write("[admin] UPnP port mapping succeeded");
+            if (!upnp.externalIP().empty())
+                log.write("[admin] External address: " + upnp.externalIP() + ":" + std::to_string(port));
+        }
+        else
+        {
+            log.write("[admin] UPnP mapping failed: " + upnp.lastError());
+            log.write("[admin] Forward port " + std::to_string(port) + " manually for internet access");
+        }
+    }
+    else
+    {
+        log.write("[admin] UPnP unavailable: " + upnp.lastError());
+        log.write("[admin] Forward port " + std::to_string(port) + " manually for internet access");
+    }
+
+    try
+    {
+        tcp::resolver resolver(io);
+        auto results = resolver.resolve(boost::asio::ip::host_name(), "");
+        log.write("[admin] LAN addresses:");
+        for (auto& result : results)
+        {
+            auto addr = result.endpoint().address();
+            if (!addr.is_loopback())
+                log.write("[admin]   " + addr.to_string() + ":" + std::to_string(port));
+        }
+    }
+    catch (...) {}
+
+    std::cout << "chatbox dedicated server running on port " << port << "\n";
+    std::cout << "Log: " << logfile << " | Bans: " << bans_file << "\n";
+
+    std::atomic<bool> quit_flag(false);
+    std::thread network_thread([&] { io.run(); });
+
+    admin_console(server, quit_flag);
+
+    log.write("[admin] Shutting down");
+    server.stop();
+    io.stop();
+    network_thread.join();
+    return 0;
+}
+
+int run_dedicated_server(int argc, char* argv[])
+{
+    if (argc < 3)
+    {
+        show_dedicated_usage();
+        return 1;
+    }
+
+    uint16_t port = 0;
+    if (!parse_port(argv[2], port))
+    {
+        std::cerr << "Invalid port number: " << argv[2] << "\n";
+        return 1;
+    }
+
+    std::string password = (argc >= 4) ? argv[3] : "";
+    std::string logfile = (argc >= 5) ? argv[4] : "chatlog.txt";
+    return run_dedicated_server_config(port, password, logfile);
+}
+
+// =====================================================
 // Main
 // =====================================================
 
-int main()
+int main(int argc, char* argv[])
 {
+    if (argc >= 2)
+    {
+        std::string mode = argv[1];
+        if (mode == "--server" || mode == "--dedicated" || mode == "-s")
+            return run_dedicated_server(argc, argv);
+
+        if (mode == "--help" || mode == "-h")
+        {
+            show_dedicated_usage();
+            return 0;
+        }
+
+        std::cerr << "Unknown option: " << mode << "\n";
+        show_dedicated_usage();
+        return 1;
+    }
+
     boost::asio::io_context io;
 
     std::unique_ptr<ChatServer> server;
@@ -929,6 +1425,76 @@ int main()
     init_pair(1, COLOR_CYAN, COLOR_BLACK);
     init_pair(2, COLOR_GREEN, COLOR_BLACK);
     init_pair(3, COLOR_YELLOW, COLOR_BLACK);
+
+    // =========================================
+    // Startup mode prompt
+    // =========================================
+
+    bool startup_selected = false;
+    while (!startup_selected)
+    {
+        erase();
+        box(stdscr, 0, 0);
+        mvprintw(2, 4, "chatbox alpha");
+        mvprintw(4, 4, "[C] Chat mode");
+        mvprintw(5, 4, "[D] Dedicated server");
+        mvprintw(6, 4, "[Q] Quit");
+        refresh();
+
+        int ch = getch();
+
+        if (ch == 'q' || ch == 'Q')
+        {
+            endwin();
+            return 0;
+        }
+        else if (ch == 'c' || ch == 'C')
+        {
+            startup_selected = true;
+        }
+        else if (ch == 'd' || ch == 'D')
+        {
+            echo();
+
+            char port_buf[PORT_BUF_SIZE] = {};
+            char logfile_buf[LOGFILE_BUF_SIZE] = {};
+
+            erase();
+            box(stdscr, 0, 0);
+            mvprintw(2, 4, "Dedicated Server");
+            mvprintw(4, 4, "Port:");
+            move(5, 4);
+            getnstr(port_buf, PORT_MAX_LEN);
+
+            noecho();
+            std::string room_password = prompt_password(7, 4,
+                "Room password (leave blank for none):");
+
+            echo();
+            mvprintw(10, 4, "Log file (leave blank for chatlog.txt):");
+            move(11, 4);
+            getnstr(logfile_buf, LOGFILE_MAX_LEN);
+            noecho();
+
+            uint16_t port = 0;
+            if (!parse_port(port_buf, port))
+            {
+                erase();
+                box(stdscr, 0, 0);
+                mvprintw(2, 4, "Invalid port number (0-65535)");
+                refresh();
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+
+            std::string logfile = logfile_buf;
+            if (logfile.empty())
+                logfile = "chatlog.txt";
+
+            endwin();
+            return run_dedicated_server_config(port, room_password, logfile);
+        }
+    }
 
     // =========================================
     // Nickname prompt
@@ -991,8 +1557,8 @@ int main()
 
             try
             {
-                int port = std::stoi(port_buf);
-                if (port < 0 || port > 65535)
+                uint16_t port = 0;
+                if (!parse_port(port_buf, port))
                 {
                     erase(); box(stdscr, 0, 0);
                     mvprintw(2, 4, "Invalid port number (0-65535)");
@@ -1003,7 +1569,7 @@ int main()
 
                 server = std::make_unique<ChatServer>(
                     io,
-                    static_cast<uint16_t>(port),
+                    port,
                     room_password);
 
                 add_user(g_nickname);
@@ -1089,8 +1655,8 @@ int main()
 
             try
             {
-                int port = std::stoi(port_buf);
-                if (port < 0 || port > 65535)
+                uint16_t port = 0;
+                if (!parse_port(port_buf, port))
                 {
                     erase(); box(stdscr, 0, 0);
                     mvprintw(2, 4, "Invalid port number (0-65535)");
@@ -1101,7 +1667,7 @@ int main()
 
                 client = std::make_unique<ChatClient>(io);
 
-                if (!client->connect(host_buf, static_cast<uint16_t>(port)))
+                if (!client->connect(host_buf, port))
                 {
                     mvprintw(10, 4, "Connection failed.");
                     refresh();
@@ -1110,12 +1676,11 @@ int main()
                     continue;
                 }
 
-                // Start network thread early so async reads can progress
-                std::thread net_tmp([&] { io.run(); });
-                net_tmp.detach(); // temporary; we re-join below
+                // Start network thread early so async reads can progress.
+                std::thread network_thread([&] { io.run(); });
 
-                // Wait briefly to see if server demands auth
-                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                for (int i = 0; i < 20 && !client->auth_required() && !client->auth_resolved(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
                 if (client->auth_required())
                 {
@@ -1137,7 +1702,9 @@ int main()
                         mvprintw(2, 4, "Authentication failed. Wrong password.");
                         refresh();
                         std::this_thread::sleep_for(std::chrono::seconds(2));
-                        io.stop();
+                        client->close();
+                        if (network_thread.joinable())
+                            network_thread.join();
                         client.reset();
                         io.restart();
                         continue;
@@ -1146,7 +1713,8 @@ int main()
 
                 // Check ban before joining
                 client->send("JOIN|" + g_nickname);
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                for (int i = 0; i < 50 && !client->join_resolved(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
                 if (client->was_banned())
                 {
@@ -1154,7 +1722,9 @@ int main()
                     mvprintw(2, 4, "You are banned from this server.");
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
-                    io.stop();
+                    client->close();
+                    if (network_thread.joinable())
+                        network_thread.join();
                     client.reset();
                     io.restart();
                     continue;
@@ -1163,9 +1733,6 @@ int main()
                 add_user(g_nickname);
                 push_message("[system] Connected to " + std::string(host_buf));
                 configured = true;
-
-                // Network thread already running (detached above); we don't rejoin here.
-                // The main chat loop starts immediately.
 
                 timeout(30);
 
@@ -1205,14 +1772,15 @@ int main()
                                 else if (cmd->name == "users")
                                 {
                                     push_message("[system] Connected users:");
-                                    std::lock_guard lock(g_mutex);
-                                    for (const auto& u : g_users)
+                                    for (const auto& u : connected_users())
                                         push_message("[system]   - " + u);
                                 }
                                 else if (cmd->name == "clear")
                                 {
-                                    std::lock_guard lock(g_mutex);
-                                    g_messages.clear();
+                                    {
+                                        std::lock_guard lock(g_mutex);
+                                        g_messages.clear();
+                                    }
                                     push_message("[system] Message history cleared");
                                 }
                                 else if (cmd->name == "time")
@@ -1266,7 +1834,11 @@ int main()
                 }
 
                 // Shutdown client
-                client->send("LEAVE|" + g_nickname);
+                if (!g_kicked)
+                    client->send("LEAVE|" + g_nickname);
+                client->close();
+                if (network_thread.joinable())
+                    network_thread.join();
 
                 std::lock_guard window_lock(g_window_mutex);
                 if (g_users_win) delwin(g_users_win);
@@ -1274,7 +1846,6 @@ int main()
                 if (g_input_win) delwin(g_input_win);
 
                 endwin();
-                io.stop();
                 return 0;
             }
             catch (...)
@@ -1327,14 +1898,15 @@ int main()
                     else if (cmd->name == "users")
                     {
                         push_message("[system] Connected users:");
-                        std::lock_guard lock(g_mutex);
-                        for (const auto& u : g_users)
+                        for (const auto& u : connected_users())
                             push_message("[system]   - " + u);
                     }
                     else if (cmd->name == "clear")
                     {
-                        std::lock_guard lock(g_mutex);
-                        g_messages.clear();
+                        {
+                            std::lock_guard lock(g_mutex);
+                            g_messages.clear();
+                        }
                         push_message("[system] Message history cleared");
                     }
                     else if (cmd->name == "time")
@@ -1359,7 +1931,7 @@ int main()
                     else if (cmd->name == "kick" && server && cmd->args.size() >= 1)
                     {
                         std::string nick = cmd->args[0];
-                        std::string reason = cmd->args.size() >= 2 ? cmd->args[1] : "";
+                        std::string reason = join_args(cmd->args, 1);
                         if (!server->kick_user(nick, reason))
                             push_message("[system] User '" + nick + "' not found");
                     }
@@ -1367,7 +1939,7 @@ int main()
                     else if (cmd->name == "ban" && server && cmd->args.size() >= 1)
                     {
                         std::string nick = cmd->args[0];
-                        std::string reason = cmd->args.size() >= 2 ? cmd->args[1] : "";
+                        std::string reason = join_args(cmd->args, 1);
                         server->ban_user(nick, reason);
                     }
                     // ---- UNBAN (host only) ----
@@ -1382,7 +1954,7 @@ int main()
                     // ---- BAN LIST ----
                     else if (cmd->name == "bans" && server)
                     {
-                        auto& bans = server->ban_list();
+                        auto bans = server->ban_list();
                         if (bans.empty())
                             push_message("[system] Ban list is empty");
                         else
