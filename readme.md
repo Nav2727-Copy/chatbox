@@ -15,10 +15,14 @@
 - Optional room password on hosted and dedicated rooms
 - Live user list in a split-pane terminal interface
 - Public messages and labeled private-message commands
+- Private messages are routed only to the sender and recipient
+- New clients receive the most recent server-side chat history on join
+- Basic server-side rate limiting for public and private messages
 - Host and dedicated-server moderation commands: kick, ban, unban, and list bans
 - Dedicated-server logging to `chatlog.txt` by default
+- Dedicated-server logging can be disabled or sent to stdout only
 - Dedicated-server ban persistence in `bans.txt`
-- Automatic UPnP port mapping with fallback LAN address display
+- Optional UPnP port mapping with fallback LAN address display
 - Base64 message framing for simple line-safe transport
 
 ## Dependencies
@@ -103,6 +107,14 @@ You can start dedicated mode from the startup menu or directly from the command 
 
 If no log file is supplied, the server writes to `chatlog.txt`. Bans are persisted in `bans.txt`.
 
+Dedicated-server options can be mixed with the positional form:
+
+```powershell
+.\out\build\x64-debug\chatbox.exe --server <port> --password <password> --log <file>
+.\out\build\x64-debug\chatbox.exe --server <port> --no-upnp --no-log
+.\out\build\x64-debug\chatbox.exe --server <port> --log-stdout
+```
+
 Dedicated-server console commands:
 
 | Command | Description |
@@ -124,7 +136,7 @@ Commands available to connected chat users:
 | --- | --- |
 | `/help` | Show available commands |
 | `/users` | List connected users |
-| `/whisper <nick> <message>` | Send a labeled private message |
+| `/whisper <nick> <message>` | Send a private message |
 | `/clear` | Clear the local message window |
 | `/time` | Show the current local time |
 | `/exit` | Leave the room |
@@ -158,11 +170,10 @@ chatbox/
 
 ## Known Limitations
 
-- `/whisper` messages are labeled as private, but the server currently broadcasts them to clients rather than doing true end-to-end private routing.
+- `/whisper` messages are routed privately by the server, but they are not encrypted end-to-end.
 - There is no cryptographic encryption or authentication.
 - Interactive-host bans are session-only; dedicated-server bans persist in `bans.txt`.
-- Duplicate nicknames are not rejected.
-- Message history is not persisted for normal chat sessions.
+- Message history is in-memory only and resets when the server exits.
 - The checked-in CMake setup is primarily configured for Windows with PDCurses.
 
 ## License

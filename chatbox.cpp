@@ -6,16 +6,8 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 /*
 Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
-- Add command-line options for server mode (e.g. listen port, password, log file, etc)
-- Add support for private messages between users
 - Add support for multiple chat rooms (currently only one global room)
-- Add better error handling and edge case handling (e.g. malformed messages, etc)
-- Add rate limiting to prevent spam (e.g. max messages per minute)
-- Add option to disable UPnP port forwarding (currently always tries and may cause issues on some networks)
-- Add option to disable logging (or log to stdout only)
-- Add more admin commands (e.g. kick user, ban user, list users, etc)
 - Add real encryption for password protected rooms
-- Add support for message history (e.g. load last 100 messages on join)
 - Clean up code and improve structure (currently a bit of a mess, especially with global variables)
 - Regret life.
 */
@@ -42,6 +34,7 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 #include <thread>
 #include <vector>
 #include <array>
+#include <cctype>
 #include <optional>
 
 using boost::asio::ip::tcp;
@@ -177,6 +170,11 @@ std::deque<std::string> g_messages;
 std::vector<std::string> g_users;
 
 constexpr int MAX_MESSAGES = 200;
+constexpr int SERVER_HISTORY_LIMIT = 100;
+constexpr int RATE_LIMIT_MESSAGES = 20;
+constexpr int RATE_LIMIT_WINDOW_SECONDS = 60;
+constexpr int MAX_WIRE_LINE_LENGTH = 4096;
+constexpr int MAX_CHAT_MESSAGE_LEN = 1000;
 constexpr int USERS_WINDOW_WIDTH = 24;
 constexpr int INPUT_WINDOW_HEIGHT = 3;
 constexpr int NICKNAME_BUF_SIZE = 32;
@@ -232,12 +230,12 @@ std::string encode_base64(const std::string& input)
     return output;
 }
 
-std::string decode_base64(const std::string& input)
+bool try_decode_base64(const std::string& input, std::string& output)
 {
-    std::string output;
+    output.clear();
 
-    if (input.size() % 4 != 0)
-        return "";
+    if (input.empty() || input.size() % 4 != 0)
+        return false;
 
     auto char_to_val = [](char c) -> int
         {
@@ -251,25 +249,84 @@ std::string decode_base64(const std::string& input)
 
     for (size_t i = 0; i < input.size(); i += 4)
     {
+        const bool final_group = i + 4 == input.size();
         int v0 = char_to_val(input[i]);
         int v1 = char_to_val(input[i + 1]);
         int v2 = char_to_val(input[i + 2]);
         int v3 = char_to_val(input[i + 3]);
 
         if (v0 < 0 || v1 < 0)
-            return "";
+            return false;
 
         output += static_cast<char>((v0 << 2) | (v1 >> 4));
 
         if (input[i + 2] != '=')
         {
+            if (v2 < 0)
+                return false;
+
             output += static_cast<char>((v1 << 4) | (v2 >> 2));
             if (input[i + 3] != '=')
+            {
+                if (v3 < 0)
+                    return false;
                 output += static_cast<char>((v2 << 6) | v3);
+            }
+            else if (!final_group)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (input[i + 3] != '=' || !final_group)
+                return false;
         }
     }
 
+    return true;
+}
+
+std::string decode_base64(const std::string& input)
+{
+    std::string output;
+    if (!try_decode_base64(input, output))
+        return "";
     return output;
+}
+
+void strip_wire_newline(std::string& line)
+{
+    if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+}
+
+bool is_valid_nickname(const std::string& nick)
+{
+    if (nick.empty() || nick.size() > NICK_MAX_LEN)
+        return false;
+
+    for (unsigned char ch : nick)
+    {
+        if (std::iscntrl(ch) || std::isspace(ch) || ch == '|' || ch == ',')
+            return false;
+    }
+
+    return true;
+}
+
+bool is_valid_chat_message(const std::string& message)
+{
+    if (message.empty() || message.size() > MAX_CHAT_MESSAGE_LEN)
+        return false;
+
+    for (unsigned char ch : message)
+    {
+        if (std::iscntrl(ch) && ch != '\t')
+            return false;
+    }
+
+    return true;
 }
 
 std::string timestamp()
@@ -347,23 +404,32 @@ std::vector<std::string> connected_users()
 class ChatLog
 {
 public:
-    explicit ChatLog(const std::string& path)
-        : path_(path)
+    enum class Mode
     {
-        file_.open(path_, std::ios::app);
-        if (file_.is_open())
-            write("=== Server started ===");
-        else
-            std::cerr << "[warn] Could not open log file: " << path_ << "\n";
+        File,
+        StdoutOnly
+    };
+
+    explicit ChatLog(const std::string& path, Mode mode = Mode::File)
+        : path_(path), mode_(mode)
+    {
+        if (mode_ == Mode::File)
+        {
+            file_.open(path_, std::ios::app);
+            if (!file_.is_open())
+                std::cerr << "[warn] Could not open log file: " << path_ << "\n";
+        }
+
+        write("=== Server started ===");
     }
 
     ~ChatLog()
     {
-        if (file_.is_open())
-        {
+        if (mode_ == Mode::StdoutOnly || file_.is_open())
             write("=== Server stopped ===");
+
+        if (file_.is_open())
             file_.close();
-        }
     }
 
     void write(const std::string& line)
@@ -379,6 +445,7 @@ public:
 
 private:
     std::string path_;
+    Mode mode_;
     std::ofstream file_;
     std::mutex mutex_;
 };
@@ -433,7 +500,8 @@ class ClientSession
 {
 public:
     ClientSession(tcp::socket socket, ChatServer& server)
-        : socket_(std::move(socket)), server_(server)
+        : socket_(std::move(socket)), server_(server),
+        buffer_(MAX_WIRE_LINE_LENGTH)
     {}
 
     void start();
@@ -446,11 +514,13 @@ public:
 private:
     void read_loop();
     void write_next();
+    bool consume_message_quota();
 
     tcp::socket   socket_;
     ChatServer& server_;
     boost::asio::streambuf buffer_;
     std::deque<std::string> write_queue_;
+    std::deque<std::chrono::steady_clock::time_point> recent_messages_;
     std::string   nickname_;
     bool          authenticated_ = false;   // true after password accepted
     bool          close_after_write_ = false;
@@ -465,8 +535,10 @@ class ChatServer
 {
 public:
     ChatServer(boost::asio::io_context& io, uint16_t port,
-        const std::string& password = "", ChatLog* log = nullptr)
-        : io_(io), acceptor_(io), password_(password), log_(log)
+        const std::string& password = "", ChatLog* log = nullptr,
+        const std::string& local_nickname = "")
+        : io_(io), acceptor_(io), password_(password), log_(log),
+        local_nickname_(local_nickname)
     {
         tcp::endpoint endpoint(tcp::v6(), port);
         acceptor_.open(endpoint.protocol());
@@ -490,6 +562,12 @@ public:
         return banned_nicks_.count(nick) > 0;
     }
 
+    bool nickname_taken(const std::string& nick) const
+    {
+        auto users = ::connected_users();
+        return std::find(users.begin(), users.end(), nick) != users.end();
+    }
+
     void join(std::shared_ptr<ClientSession> session)
     {
         std::lock_guard lock(sessions_mutex_);
@@ -505,6 +583,7 @@ public:
     void broadcast(const std::string& msg)
     {
         push_message(msg);
+        remember_history(msg);
         if (log_)
             log_->write(msg);
 
@@ -521,6 +600,71 @@ public:
     void broadcast_server(const std::string& msg)
     {
         broadcast("[SERVER] " + msg);
+    }
+
+    bool send_private(const std::string& sender,
+        const std::string& target,
+        const std::string& message,
+        bool mirror_to_local = false)
+    {
+        std::shared_ptr<ClientSession> sender_session;
+        std::shared_ptr<ClientSession> target_session;
+        {
+            std::lock_guard lock(sessions_mutex_);
+            for (auto& s : sessions_)
+            {
+                if (s->nickname() == sender)
+                    sender_session = s;
+                if (s->nickname() == target)
+                    target_session = s;
+            }
+        }
+
+        const bool target_is_local =
+            !local_nickname_.empty() && target == local_nickname_;
+
+        if (!target_session && !target_is_local)
+        {
+            std::string error = "[system] User '" + target + "' not found";
+            if (sender_session)
+                sender_session->deliver(error);
+            if (mirror_to_local)
+                push_message(error);
+            return false;
+        }
+
+        std::string line = "[PRIVATE " + timestamp() + "] "
+            + sender + " -> " + target + ": " + message;
+
+        if (target_is_local || mirror_to_local)
+            push_message(line);
+
+        if (target_session)
+            target_session->deliver(line);
+
+        if (sender_session && sender != target)
+            sender_session->deliver(line);
+
+        if (log_)
+            log_->write("[private] " + sender + " -> " + target + ": " + message);
+
+        return true;
+    }
+
+    void deliver_history(std::shared_ptr<ClientSession> session) const
+    {
+        std::vector<std::string> history;
+        {
+            std::lock_guard lock(history_mutex_);
+            history.assign(history_.begin(), history_.end());
+        }
+
+        if (history.empty())
+            return;
+
+        session->deliver("[system] Recent messages:");
+        for (const auto& msg : history)
+            session->deliver(msg);
     }
 
     void broadcast_users()
@@ -670,6 +814,14 @@ public:
     }
 
 private:
+    void remember_history(const std::string& msg)
+    {
+        std::lock_guard lock(history_mutex_);
+        history_.push_back(msg);
+        if (history_.size() > SERVER_HISTORY_LIMIT)
+            history_.pop_front();
+    }
+
     void accept_loop()
     {
         acceptor_.async_accept(
@@ -704,12 +856,16 @@ private:
     std::string   password_;
     ChatLog*      log_ = nullptr;
     std::string   bans_file_;
+    std::string   local_nickname_;
 
     mutable std::mutex sessions_mutex_;
     std::set<std::shared_ptr<ClientSession>> sessions_;
 
     mutable std::mutex ban_mutex_;
     std::set<std::string> banned_nicks_;
+
+    mutable std::mutex history_mutex_;
+    std::deque<std::string> history_;
 };
 
 // =====================================================
@@ -749,8 +905,16 @@ void ClientSession::read_loop()
             std::istream is(&buffer_);
             std::string  line;
             std::getline(is, line);
+            strip_wire_newline(line);
 
-            std::string decoded = decode_base64(line);
+            std::string decoded;
+            if (!try_decode_base64(line, decoded))
+            {
+                deliver("[system] Ignored invalid message frame");
+                read_loop();
+                return;
+            }
+
             auto parts = split(decoded, '|');
 
             if (parts.empty())
@@ -791,6 +955,21 @@ void ClientSession::read_loop()
             {
                 std::string nick = parts[1];
 
+                if (!nickname_.empty())
+                {
+                    deliver("JOIN_FAIL|Already joined");
+                    read_loop();
+                    return;
+                }
+
+                if (!is_valid_nickname(nick))
+                {
+                    deliver("JOIN_FAIL|Invalid nickname");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
                 if (server_.is_banned(nick))
                 {
                     deliver("BANNED");
@@ -799,37 +978,131 @@ void ClientSession::read_loop()
                     return;
                 }
 
+                if (server_.nickname_taken(nick))
+                {
+                    deliver("NICK_TAKEN");
+                    close();
+                    server_.leave(self);
+                    return;
+                }
+
                 nickname_ = nick;
                 add_user(nickname_);
                 deliver("JOIN_OK");
+                server_.deliver_history(self);
                 server_.broadcast("[system] " + nickname_ + " joined");
                 server_.broadcast_users();
             }
             // ---- LEAVE ----
             else if (parts[0] == "LEAVE" && parts.size() >= 2)
             {
-                remove_user(parts[1]);
-                server_.broadcast("[system] " + parts[1] + " left");
+                if (nickname_.empty() || parts[1] != nickname_)
+                {
+                    deliver("[system] Ignored malformed leave request");
+                    read_loop();
+                    return;
+                }
+
+                std::string leaving_nick = nickname_;
+                nickname_.clear();
+                remove_user(leaving_nick);
+                server_.broadcast("[system] " + leaving_nick + " left");
                 server_.broadcast_users();
-                if (nickname_ == parts[1])
-                    nickname_.clear();
             }
             // ---- MSG ----
             else if (parts[0] == "MSG" && parts.size() >= 3)
             {
-                server_.broadcast(
-                    "[" + timestamp() + "] " + parts[1] + ": " + join_fields(parts, 2, '|'));
+                if (nickname_.empty())
+                {
+                    deliver("[system] Join before sending messages");
+                    read_loop();
+                    return;
+                }
+
+                if (!consume_message_quota())
+                {
+                    deliver("[system] Slow down - message rate limit is "
+                        + std::to_string(RATE_LIMIT_MESSAGES)
+                        + " per minute");
+                    read_loop();
+                    return;
+                }
+
+                if (parts[1] != nickname_)
+                {
+                    deliver("[system] Ignored message with mismatched sender");
+                    read_loop();
+                    return;
+                }
+
+                std::string message = join_fields(parts, 2, '|');
+                if (!is_valid_chat_message(message))
+                {
+                    deliver("[system] Invalid message text");
+                    read_loop();
+                    return;
+                }
+
+                server_.broadcast("[" + timestamp() + "] " + nickname_ + ": " + message);
             }
             // ---- WHISPER ----
             else if (parts[0] == "WHISPER" && parts.size() >= 4)
             {
-                server_.broadcast(
-                    "[PRIVATE " + timestamp() + "] "
-                    + parts[1] + " -> " + parts[2] + ": " + join_fields(parts, 3, '|'));
+                if (nickname_.empty())
+                {
+                    deliver("[system] Join before sending messages");
+                    read_loop();
+                    return;
+                }
+
+                if (!consume_message_quota())
+                {
+                    deliver("[system] Slow down - message rate limit is "
+                        + std::to_string(RATE_LIMIT_MESSAGES)
+                        + " per minute");
+                    read_loop();
+                    return;
+                }
+
+                if (parts[1] != nickname_)
+                {
+                    deliver("[system] Ignored whisper with mismatched sender");
+                    read_loop();
+                    return;
+                }
+
+                std::string message = join_fields(parts, 3, '|');
+                if (!is_valid_nickname(parts[2]) || !is_valid_chat_message(message))
+                {
+                    deliver("[system] Invalid whisper target or message");
+                    read_loop();
+                    return;
+                }
+
+                server_.send_private(nickname_, parts[2], message);
+            }
+            else
+            {
+                deliver("[system] Ignored malformed message");
             }
 
             read_loop();
         });
+}
+
+bool ClientSession::consume_message_quota()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto window = std::chrono::seconds(RATE_LIMIT_WINDOW_SECONDS);
+
+    while (!recent_messages_.empty() && now - recent_messages_.front() > window)
+        recent_messages_.pop_front();
+
+    if (recent_messages_.size() >= RATE_LIMIT_MESSAGES)
+        return false;
+
+    recent_messages_.push_back(now);
+    return true;
 }
 
 void ClientSession::deliver(const std::string& msg)
@@ -904,7 +1177,7 @@ class ChatClient
 {
 public:
     ChatClient(boost::asio::io_context& io)
-        : socket_(io)
+        : socket_(io), buffer_(MAX_WIRE_LINE_LENGTH)
     {}
 
     // connect() returns false on failure.
@@ -964,6 +1237,9 @@ public:
     bool join_resolved()       const { return join_resolved_; }
     bool was_kicked()          const { return kicked_; }
     bool was_banned()          const { return banned_; }
+    bool nickname_taken()      const { return nickname_taken_; }
+    bool join_failed()         const { return join_failed_; }
+    const std::string& join_failure_reason() const { return join_failure_reason_; }
     const std::string& kick_reason() const { return kick_reason_; }
 
 private:
@@ -1012,8 +1288,15 @@ private:
                 std::istream is(&buffer_);
                 std::string  line;
                 std::getline(is, line);
+                strip_wire_newline(line);
 
-                std::string decoded = decode_base64(line);
+                std::string decoded;
+                if (!try_decode_base64(line, decoded))
+                {
+                    push_message("[system] Ignored invalid server message");
+                    read_loop();
+                    return;
+                }
 
                 // Server signals
                 if (decoded == "AUTH_REQUIRED")
@@ -1041,6 +1324,19 @@ private:
                     banned_ = true;
                     push_message("[system] You are banned from this server");
                 }
+                else if (decoded == "NICK_TAKEN")
+                {
+                    join_resolved_ = true;
+                    nickname_taken_ = true;
+                    push_message("[system] Nickname is already in use");
+                }
+                else if (decoded.rfind("JOIN_FAIL|", 0) == 0)
+                {
+                    join_resolved_ = true;
+                    join_failed_ = true;
+                    join_failure_reason_ = decoded.substr(10);
+                    push_message("[system] Join failed: " + join_failure_reason_);
+                }
                 else if (decoded.rfind("KICK|", 0) == 0)
                 {
                     kicked_ = true;
@@ -1058,7 +1354,8 @@ private:
                     g_users.clear();
                     if (!list.empty())
                         for (auto& name : split(list, ','))
-                            g_users.push_back(name);
+                            if (is_valid_nickname(name))
+                                g_users.push_back(name);
                 }
                 else
                 {
@@ -1079,8 +1376,11 @@ private:
     std::atomic<bool> join_resolved_{ false };
     std::atomic<bool> kicked_{ false };
     std::atomic<bool> banned_{ false };
+    std::atomic<bool> nickname_taken_{ false };
+    std::atomic<bool> join_failed_{ false };
     std::atomic<bool> closing_{ false };
     std::string       kick_reason_;
+    std::string       join_failure_reason_;
     bool              close_after_write_ = false;
 };
 
@@ -1188,16 +1488,50 @@ std::string prompt_password(int row, int col, const char* label)
     return pw;
 }
 
+bool prompt_yes_no(int row, int col, const char* label, bool default_yes = true)
+{
+    mvprintw(row, col, "%s", label);
+    refresh();
+
+    while (true)
+    {
+        int ch = getch();
+        if (ch == '\n' || ch == '\r')
+            return default_yes;
+        if (ch == 'y' || ch == 'Y')
+            return true;
+        if (ch == 'n' || ch == 'N')
+            return false;
+    }
+}
+
 // =====================================================
 // Dedicated server mode
 // =====================================================
+
+struct DedicatedServerConfig
+{
+    uint16_t port = 0;
+    std::string password;
+    std::string logfile = "chatlog.txt";
+    std::string bans_file = "bans.txt";
+    bool enable_logging = true;
+    bool log_to_stdout_only = false;
+    bool enable_upnp = true;
+};
 
 void show_dedicated_usage()
 {
     std::cout
         << "Usage:\n"
-        << "  chatbox --server <port> [password] [logfile]\n"
-        << "  chatbox --dedicated <port> [password] [logfile]\n\n"
+        << "  chatbox --server <port> [password] [logfile] [options]\n"
+        << "  chatbox --dedicated <port> [password] [logfile] [options]\n\n"
+        << "Options:\n"
+        << "  --password <password>  - set the room password\n"
+        << "  --log <file>           - write logs to a file\n"
+        << "  --log-stdout           - print logs only to stdout\n"
+        << "  --no-log               - disable chat logging\n"
+        << "  --no-upnp              - skip UPnP port forwarding\n\n"
         << "Dedicated server admin commands:\n"
         << "  /kick <nick> [reason]  - kick a connected user\n"
         << "  /ban  <nick> [reason]  - ban a user and persist it\n"
@@ -1306,65 +1640,88 @@ void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
     }
 }
 
-int run_dedicated_server_config(uint16_t port,
-    const std::string& password,
-    const std::string& logfile)
+int run_dedicated_server_config(const DedicatedServerConfig& config)
 {
-    std::string bans_file = "bans.txt";
+    std::unique_ptr<ChatLog> log;
+    if (config.enable_logging)
+    {
+        log = std::make_unique<ChatLog>(
+            config.log_to_stdout_only ? "" : config.logfile,
+            config.log_to_stdout_only ? ChatLog::Mode::StdoutOnly : ChatLog::Mode::File);
+    }
 
-    ChatLog log(logfile);
-    log.write("[admin] Starting dedicated server on port " + std::to_string(port));
-    if (!password.empty())
-        log.write("[admin] Password protection enabled");
+    auto log_admin = [&](const std::string& line)
+        {
+            if (log)
+                log->write(line);
+            else
+                std::cout << line << "\n";
+        };
+
+    log_admin("[admin] Starting dedicated server on port " + std::to_string(config.port));
+    if (!config.password.empty())
+        log_admin("[admin] Password protection enabled");
 
     boost::asio::io_context io;
-    ChatServer server(io, port, password, &log);
-    server.load_bans(bans_file);
+    ChatServer server(io, config.port, config.password, log.get());
+    server.load_bans(config.bans_file);
 
     UPnPMapper upnp;
-    if (upnp.discover())
+    if (config.enable_upnp && upnp.discover())
     {
-        if (upnp.openPortBoth(std::to_string(port), "chatbox dedicated server"))
+        if (upnp.openPortBoth(std::to_string(config.port), "chatbox dedicated server"))
         {
-            log.write("[admin] UPnP port mapping succeeded");
+            log_admin("[admin] UPnP port mapping succeeded");
             if (!upnp.externalIP().empty())
-                log.write("[admin] External address: " + upnp.externalIP() + ":" + std::to_string(port));
+                log_admin("[admin] External address: " + upnp.externalIP() + ":" + std::to_string(config.port));
         }
         else
         {
-            log.write("[admin] UPnP mapping failed: " + upnp.lastError());
-            log.write("[admin] Forward port " + std::to_string(port) + " manually for internet access");
+            log_admin("[admin] UPnP mapping failed: " + upnp.lastError());
+            log_admin("[admin] Forward port " + std::to_string(config.port) + " manually for internet access");
         }
+    }
+    else if (!config.enable_upnp)
+    {
+        log_admin("[admin] UPnP disabled; forward port "
+            + std::to_string(config.port) + " manually for internet access");
     }
     else
     {
-        log.write("[admin] UPnP unavailable: " + upnp.lastError());
-        log.write("[admin] Forward port " + std::to_string(port) + " manually for internet access");
+        log_admin("[admin] UPnP unavailable: " + upnp.lastError());
+        log_admin("[admin] Forward port " + std::to_string(config.port) + " manually for internet access");
     }
 
     try
     {
         tcp::resolver resolver(io);
         auto results = resolver.resolve(boost::asio::ip::host_name(), "");
-        log.write("[admin] LAN addresses:");
+        log_admin("[admin] LAN addresses:");
         for (auto& result : results)
         {
             auto addr = result.endpoint().address();
             if (!addr.is_loopback())
-                log.write("[admin]   " + addr.to_string() + ":" + std::to_string(port));
+                log_admin("[admin]   " + addr.to_string() + ":" + std::to_string(config.port));
         }
     }
     catch (...) {}
 
-    std::cout << "chatbox dedicated server running on port " << port << "\n";
-    std::cout << "Log: " << logfile << " | Bans: " << bans_file << "\n";
+    std::cout << "chatbox dedicated server running on port " << config.port << "\n";
+    std::cout << "Log: ";
+    if (!config.enable_logging)
+        std::cout << "disabled";
+    else if (config.log_to_stdout_only)
+        std::cout << "stdout only";
+    else
+        std::cout << config.logfile;
+    std::cout << " | Bans: " << config.bans_file << "\n";
 
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
 
     admin_console(server, quit_flag);
 
-    log.write("[admin] Shutting down");
+    log_admin("[admin] Shutting down");
     server.stop();
     io.stop();
     network_thread.join();
@@ -1386,9 +1743,77 @@ int run_dedicated_server(int argc, char* argv[])
         return 1;
     }
 
-    std::string password = (argc >= 4) ? argv[3] : "";
-    std::string logfile = (argc >= 5) ? argv[4] : "chatlog.txt";
-    return run_dedicated_server_config(port, password, logfile);
+    DedicatedServerConfig config;
+    config.port = port;
+
+    bool positional_password_set = false;
+    bool positional_log_set = false;
+
+    for (int i = 3; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+
+        if (arg == "--no-upnp")
+        {
+            config.enable_upnp = false;
+        }
+        else if (arg == "--no-log")
+        {
+            config.enable_logging = false;
+        }
+        else if (arg == "--log-stdout")
+        {
+            config.enable_logging = true;
+            config.log_to_stdout_only = true;
+        }
+        else if (arg == "--password" && i + 1 < argc)
+        {
+            config.password = argv[++i];
+            positional_password_set = true;
+        }
+        else if (arg == "--log" && i + 1 < argc)
+        {
+            config.logfile = argv[++i];
+            config.enable_logging = true;
+            config.log_to_stdout_only = false;
+            positional_log_set = true;
+        }
+        else if (arg == "--help" || arg == "-h")
+        {
+            show_dedicated_usage();
+            return 0;
+        }
+        else if (arg == "--password" || arg == "--log")
+        {
+            std::cerr << arg << " requires a value\n";
+            show_dedicated_usage();
+            return 1;
+        }
+        else if (arg.rfind("--", 0) == 0)
+        {
+            std::cerr << "Unknown option: " << arg << "\n";
+            show_dedicated_usage();
+            return 1;
+        }
+        else if (!positional_password_set)
+        {
+            config.password = arg;
+            positional_password_set = true;
+        }
+        else if (!positional_log_set)
+        {
+            config.logfile = arg;
+            positional_log_set = true;
+        }
+        else
+        {
+            std::cerr << "Unknown option: " << arg << "\n";
+            show_dedicated_usage();
+            return 1;
+        }
+    }
+
+    return run_dedicated_server_config(config);
 }
 
 // =====================================================
@@ -1474,9 +1899,11 @@ int main(int argc, char* argv[])
             std::string room_password = prompt_password(7, 4,
                 "Room password (leave blank for none):");
 
+            bool enable_upnp = prompt_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
+
             echo();
-            mvprintw(10, 4, "Log file (leave blank for chatlog.txt):");
-            move(11, 4);
+            mvprintw(12, 4, "Log file (blank chatlog.txt, 'none' disables, 'stdout' console only):");
+            move(13, 4);
             getnstr(logfile_buf, LOGFILE_MAX_LEN);
             noecho();
 
@@ -1491,12 +1918,27 @@ int main(int argc, char* argv[])
                 continue;
             }
 
+            DedicatedServerConfig config;
+            config.port = port;
+            config.password = room_password;
+            config.enable_upnp = enable_upnp;
+
             std::string logfile = logfile_buf;
-            if (logfile.empty())
-                logfile = "chatlog.txt";
+            if (logfile == "none")
+            {
+                config.enable_logging = false;
+            }
+            else if (logfile == "stdout")
+            {
+                config.log_to_stdout_only = true;
+            }
+            else if (!logfile.empty())
+            {
+                config.logfile = logfile;
+            }
 
             endwin();
-            return run_dedicated_server_config(port, room_password, logfile);
+            return run_dedicated_server_config(config);
         }
     }
 
@@ -1504,17 +1946,29 @@ int main(int argc, char* argv[])
     // Nickname prompt
     // =========================================
 
-    echo();
+    while (true)
+    {
+        echo();
 
-    char nick_buf[NICKNAME_BUF_SIZE];
-    erase();
-    box(stdscr, 0, 0);
-    mvprintw(2, 4, "Enter nickname:");
-    move(3, 4);
-    getnstr(nick_buf, NICK_MAX_LEN);
-    g_nickname = nick_buf;
+        char nick_buf[NICKNAME_BUF_SIZE] = {};
+        erase();
+        box(stdscr, 0, 0);
+        mvprintw(2, 4, "Enter nickname:");
+        move(3, 4);
+        getnstr(nick_buf, NICK_MAX_LEN);
+        g_nickname = nick_buf;
 
-    noecho();
+        noecho();
+
+        if (is_valid_nickname(g_nickname))
+            break;
+
+        erase();
+        box(stdscr, 0, 0);
+        mvprintw(2, 4, "Invalid nickname. Use 1-%d non-space characters without | or ,.", NICK_MAX_LEN);
+        refresh();
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
 
     // =========================================
     // Main menu
@@ -1559,6 +2013,8 @@ int main(int argc, char* argv[])
             std::string room_password = prompt_password(7, 4,
                 "Room password (leave blank for none):");
 
+            bool enable_upnp = prompt_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
+
             try
             {
                 uint16_t port = 0;
@@ -1574,7 +2030,9 @@ int main(int argc, char* argv[])
                 server = std::make_unique<ChatServer>(
                     io,
                     port,
-                    room_password);
+                    room_password,
+                    nullptr,
+                    g_nickname);
 
                 add_user(g_nickname);
                 push_message("[system] Hosting on port " + std::to_string(port));
@@ -1583,30 +2041,37 @@ int main(int argc, char* argv[])
                     push_message("[system] Room password protection enabled");
 
                 // UPnP
-                upnp = std::make_unique<UPnPMapper>();
-                push_message("[system] Attempting UPnP port mapping...");
-
-                if (upnp->discover())
+                if (enable_upnp)
                 {
-                    if (upnp->openPortBoth(std::to_string(port)))
+                    upnp = std::make_unique<UPnPMapper>();
+                    push_message("[system] Attempting UPnP port mapping...");
+
+                    if (upnp->discover())
                     {
-                        push_message("[system] UPnP OK - port " + std::to_string(port) + " opened on router");
-                        if (!upnp->externalIP().empty())
+                        if (upnp->openPortBoth(std::to_string(port)))
                         {
-                            push_message("[system] External address: " + upnp->externalIP() + ":" + std::to_string(port));
-                            push_message("[system] Share that address with your peer");
+                            push_message("[system] UPnP OK - port " + std::to_string(port) + " opened on router");
+                            if (!upnp->externalIP().empty())
+                            {
+                                push_message("[system] External address: " + upnp->externalIP() + ":" + std::to_string(port));
+                                push_message("[system] Share that address with your peer");
+                            }
+                        }
+                        else
+                        {
+                            push_message("[system] UPnP mapping failed: " + upnp->lastError());
+                            push_message("[system] You may need to forward port " + std::to_string(port) + " manually");
                         }
                     }
                     else
                     {
-                        push_message("[system] UPnP mapping failed: " + upnp->lastError());
-                        push_message("[system] You may need to forward port " + std::to_string(port) + " manually");
+                        push_message("[system] UPnP unavailable: " + upnp->lastError());
+                        push_message("[system] Forward port " + std::to_string(port) + " manually for internet access");
                     }
                 }
                 else
                 {
-                    push_message("[system] UPnP unavailable: " + upnp->lastError());
-                    push_message("[system] Forward port " + std::to_string(port) + " manually for internet access");
+                    push_message("[system] UPnP disabled; forward port " + std::to_string(port) + " manually for internet access");
                 }
 
                 // LAN addresses
@@ -1724,6 +2189,34 @@ int main(int argc, char* argv[])
                 {
                     erase(); box(stdscr, 0, 0);
                     mvprintw(2, 4, "You are banned from this server.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    client->close();
+                    if (network_thread.joinable())
+                        network_thread.join();
+                    client.reset();
+                    io.restart();
+                    continue;
+                }
+
+                if (client->nickname_taken())
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Nickname is already in use.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    client->close();
+                    if (network_thread.joinable())
+                        network_thread.join();
+                    client.reset();
+                    io.restart();
+                    continue;
+                }
+
+                if (client->join_failed())
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Join failed: %s", client->join_failure_reason().c_str());
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     client->close();
@@ -1927,7 +2420,8 @@ int main(int argc, char* argv[])
                             {
                                 std::string target = cmd->args[0];
                                 std::string message = input.substr(cmd_end + 1);
-                                push_message("[PRIVATE " + timestamp() + "] " + g_nickname + " -> " + target + ": " + message);
+                                if (server)
+                                    server->send_private(g_nickname, target, message, true);
                             }
                         }
                     }
