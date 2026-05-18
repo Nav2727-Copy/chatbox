@@ -15,6 +15,9 @@ Todo:
 - Add option to disable logging (or log to stdout only)
 - Add option to disable admin console (or add password protection for it)
 - Add more admin commands (e.g. kick user, ban user, list users, etc)
+- Add support for file transfers (e.g. send a file to another user)
+- Add support for message history (e.g. load last 100 messages on join)
+- Clean up code and improve structure (currently a bit of a mess, especially with global variables)
 - Regret life.
 */
 
