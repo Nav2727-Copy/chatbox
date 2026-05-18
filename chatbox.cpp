@@ -13,9 +13,8 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 - Add rate limiting to prevent spam (e.g. max messages per minute)
 - Add option to disable UPnP port forwarding (currently always tries and may cause issues on some networks)
 - Add option to disable logging (or log to stdout only)
-- Add option to disable admin console (or add password protection for it)
 - Add more admin commands (e.g. kick user, ban user, list users, etc)
-- Add support for file transfers (e.g. send a file to another user)
+- Add real encryption for password protected rooms
 - Add support for message history (e.g. load last 100 messages on join)
 - Clean up code and improve structure (currently a bit of a mess, especially with global variables)
 - Regret life.
