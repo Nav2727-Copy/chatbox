@@ -12,6 +12,9 @@
 
 - Host or join a TCP chat room from the terminal
 - Run a headless dedicated server from the menu or command line
+- Run a headless server browser that published rooms can register with
+- Publish hosted or dedicated rooms to a browser server for easier discovery
+- Browse published rooms and join one from the terminal UI
 - Optional room password on hosted and dedicated rooms
 - Public-key nickname identity: first use registers a nickname key, future joins must prove the same private key
 - Live user list in a split-pane terminal interface
@@ -77,6 +80,7 @@ At startup:
 | --- | --- |
 | `C` | Chat mode: choose whether to host or join |
 | `D` | Dedicated server mode |
+| `B` | Browser server mode |
 | `Q` | Quit |
 
 In chat mode, enter a nickname first. Then:
@@ -85,9 +89,11 @@ In chat mode, enter a nickname first. Then:
 | --- | --- |
 | `H` | Host a room on a port and optionally set a room password |
 | `J` | Join an existing host by address and port |
+| `B` | Query a server browser and choose a published room |
 | `Q` | Quit before connecting |
 
 When hosting, chatbox attempts UPnP port mapping, prints an external address when available, and also lists LAN addresses. If UPnP is unavailable, manually forward the selected port for internet clients.
+Hosted rooms can optionally publish themselves to a browser server on fixed port `2727`. When prompted, enter the browser server IP, room name, and public IP/address clients should connect to. If the public address is left blank, chatbox uses the UPnP external address when available, then a LAN address, then `127.0.0.1`.
 
 In chat:
 
@@ -117,9 +123,11 @@ Dedicated-server options can be mixed with the positional form:
 .\out\build\x64-debug\chatbox.exe --server <port> --identities identities.txt
 .\out\build\x64-debug\chatbox.exe --server <port> --no-upnp --no-log
 .\out\build\x64-debug\chatbox.exe --server <port> --log-stdout
+.\out\build\x64-debug\chatbox.exe --server <port> --publish <browser-host> --name "Room name"
 ```
 
 Use `--identities <file>` to choose where the dedicated server stores nickname-to-public-key bindings.
+Use `--publish <host>` to register the dedicated server with a browser server on fixed port `2727`. Use `--public-host <host>` when the browser should advertise a specific internet-facing address instead of the auto-detected UPnP or LAN address.
 
 Dedicated-server console commands:
 
@@ -133,6 +141,32 @@ Dedicated-server console commands:
 | `/bans` | List banned nicknames |
 | `/broadcast <message>` | Send a server announcement |
 | `/quit` or `/exit` | Shut down the server |
+
+## Server Browser
+
+A server browser is a lightweight rendezvous server. Chat hosts and dedicated servers publish their room name, connect address, port, password status, and user count to it. Clients query it for a list and then connect directly to the selected chat server.
+
+Run a browser server:
+
+```powershell
+.\out\build\x64-debug\chatbox.exe --browser
+```
+
+List published rooms from the command line:
+
+```powershell
+.\out\build\x64-debug\chatbox.exe --browse <browser-host>
+```
+
+Server browser console commands:
+
+| Command | Description |
+| --- | --- |
+| `/help` | Show browser help |
+| `/servers` | List currently published, non-expired rooms |
+| `/quit` or `/exit` | Shut down the browser server |
+
+Published rooms refresh their listing once per minute and unregister on clean shutdown. Browser entries expire after three minutes if a room stops refreshing.
 
 ## Chat Commands
 
@@ -183,6 +217,7 @@ chatbox/
 - If a user's local identity key file is lost, the server will reject that nickname until the server identity binding is reset.
 - Interactive-host bans are session-only; dedicated-server bans persist in `bans.txt`.
 - Message history is in-memory only and resets when the server exits.
+- Server browser entries are self-reported and are not authenticated or health-checked beyond their refresh timeout.
 - The checked-in CMake setup is primarily configured for Windows with PDCurses.
 
 ## License

@@ -6,7 +6,6 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 /*
 Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
-- Add a server browser function to program (like the dedicated server), servers can send data about themselves to user hosted browser server, and clients can query browser server for list of available servers. This is a must for the program to be usable by non-technical people.
 - Add real encryption for password protected rooms
 - Refactor the codebase to be more modular for future GUI version, and to generally improve code quality
 */
@@ -23,6 +22,7 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <fstream>
 #include <format>
 #include <iostream>
@@ -33,9 +33,11 @@ Todo: (FINISH THIS LIST BEFORE BETA RELEASE!!!!)
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <array>
 #include <cctype>
+#include <exception>
 #include <optional>
 
 using boost::asio::ip::tcp;
@@ -189,6 +191,10 @@ constexpr int PORT_MAX_LEN = 15;
 constexpr int PASS_MAX_LEN = 63;
 constexpr int LOGFILE_MAX_LEN = 259;
 constexpr int IDENTITY_CHALLENGE_BYTES = 32;
+constexpr int BROWSER_PORT = 2727;
+constexpr int BROWSER_NAME_MAX_LEN = 48;
+constexpr int BROWSER_ENTRY_TTL_SECONDS = 180;
+constexpr int BROWSER_PUBLISH_INTERVAL_SECONDS = 60;
 
 std::string g_nickname;
 
@@ -217,16 +223,23 @@ std::string encode_base64(const std::string& input)
 
     while (i < static_cast<int>(input.size()))
     {
+        int bytes = 1;
         uint32_t b = (static_cast<unsigned char>(input[i++]) & 0xFF) << 16;
         if (i < static_cast<int>(input.size()))
+        {
             b |= (static_cast<unsigned char>(input[i++]) & 0xFF) << 8;
+            ++bytes;
+        }
         if (i < static_cast<int>(input.size()))
+        {
             b |= (static_cast<unsigned char>(input[i++]) & 0xFF);
+            ++bytes;
+        }
 
         output += BASE64_CHARS[(b >> 18) & 0x3F];
         output += BASE64_CHARS[(b >> 12) & 0x3F];
-        output += (i - 2 < static_cast<int>(input.size())) ? BASE64_CHARS[(b >> 6) & 0x3F] : '=';
-        output += (i - 1 < static_cast<int>(input.size())) ? BASE64_CHARS[b & 0x3F] : '=';
+        output += (bytes >= 2) ? BASE64_CHARS[(b >> 6) & 0x3F] : '=';
+        output += (bytes == 3) ? BASE64_CHARS[b & 0x3F] : '=';
     }
 
     return output;
@@ -652,6 +665,477 @@ void show_command_help()
     push_message("[system] /exit                    - Exit the application");
     push_message("[system] === End Help ===");
 }
+
+// =====================================================
+// Server browser
+// =====================================================
+
+struct BrowserEntry
+{
+    std::string name;
+    std::string host;
+    uint16_t port = 0;
+    bool has_password = false;
+    int users = 0;
+    std::chrono::system_clock::time_point updated_at;
+};
+
+std::string sanitize_browser_field(const std::string& text, size_t max_len)
+{
+    std::string out;
+    for (unsigned char ch : text)
+    {
+        if (out.size() >= max_len)
+            break;
+        if (std::iscntrl(ch) || ch == '|')
+            continue;
+        out += static_cast<char>(ch);
+    }
+    return out;
+}
+
+std::string browser_entry_key(const std::string& host, uint16_t port, const std::string& name)
+{
+    return host + "|" + std::to_string(port) + "|" + name;
+}
+
+bool parse_u16_field(const std::string& text, uint16_t& out)
+{
+    try
+    {
+        size_t consumed = 0;
+        int value = std::stoi(text, &consumed);
+        if (consumed != text.size() || value < 0 || value > 65535)
+            return false;
+        out = static_cast<uint16_t>(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+class ServerBrowser
+{
+public:
+    ServerBrowser(boost::asio::io_context& io, uint16_t port)
+        : io_(io), acceptor_(io)
+    {
+        tcp::endpoint endpoint(tcp::v6(), port);
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(boost::asio::ip::v6_only(false));
+        acceptor_.set_option(tcp::acceptor::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
+        accept_loop();
+    }
+
+    void stop()
+    {
+        boost::asio::post(io_,
+            [this]
+            {
+                boost::system::error_code ignored;
+                acceptor_.close(ignored);
+            });
+    }
+
+    std::vector<BrowserEntry> entries() const
+    {
+        std::lock_guard lock(entries_mutex_);
+        auto now = std::chrono::system_clock::now();
+        std::vector<BrowserEntry> out;
+        for (const auto& [_, entry] : entries_)
+        {
+            if (now - entry.updated_at <= std::chrono::seconds(BROWSER_ENTRY_TTL_SECONDS))
+                out.push_back(entry);
+        }
+        return out;
+    }
+
+    std::vector<std::string> process_request(const std::string& request)
+    {
+        auto parts = split(request, '|');
+        if (parts.empty())
+            return { "ERROR|Empty request" };
+
+        if (parts[0] == "REGISTER")
+        {
+            if (parts.size() < 6)
+                return { "ERROR|REGISTER requires name, host, port, password flag, users" };
+
+            BrowserEntry entry;
+            entry.name = sanitize_browser_field(parts[1], BROWSER_NAME_MAX_LEN);
+            entry.host = sanitize_browser_field(parts[2], HOST_MAX_LEN);
+
+            if (entry.name.empty())
+                entry.name = "chatbox room";
+            if (entry.host.empty() || !parse_u16_field(parts[3], entry.port))
+                return { "ERROR|Invalid host or port" };
+
+            entry.has_password = parts[4] == "1";
+            try
+            {
+                entry.users = std::max(0, std::stoi(parts[5]));
+            }
+            catch (...)
+            {
+                entry.users = 0;
+            }
+            entry.updated_at = std::chrono::system_clock::now();
+
+            {
+                std::lock_guard lock(entries_mutex_);
+                remove_stale_locked();
+                entries_[browser_entry_key(entry.host, entry.port, entry.name)] = entry;
+            }
+
+            return { "OK" };
+        }
+
+        if (parts[0] == "UNREGISTER")
+        {
+            if (parts.size() < 4)
+                return { "ERROR|UNREGISTER requires host, port, name" };
+
+            uint16_t port = 0;
+            if (!parse_u16_field(parts[2], port))
+                return { "ERROR|Invalid port" };
+
+            std::string host = sanitize_browser_field(parts[1], HOST_MAX_LEN);
+            std::string name = sanitize_browser_field(parts[3], BROWSER_NAME_MAX_LEN);
+
+            std::lock_guard lock(entries_mutex_);
+            entries_.erase(browser_entry_key(host, port, name));
+            return { "OK" };
+        }
+
+        if (parts[0] == "LIST")
+        {
+            std::vector<std::string> response;
+            auto now = std::chrono::system_clock::now();
+            {
+                std::lock_guard lock(entries_mutex_);
+                remove_stale_locked();
+                for (const auto& [_, entry] : entries_)
+                {
+                    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - entry.updated_at).count();
+                    response.push_back("SERVER|" + entry.name
+                        + "|" + entry.host
+                        + "|" + std::to_string(entry.port)
+                        + "|" + (entry.has_password ? "1" : "0")
+                        + "|" + std::to_string(entry.users)
+                        + "|" + std::to_string(age));
+                }
+            }
+            response.push_back("END");
+            return response;
+        }
+
+        return { "ERROR|Unknown request" };
+    }
+
+private:
+    class Session : public std::enable_shared_from_this<Session>
+    {
+    public:
+        Session(tcp::socket socket, ServerBrowser& browser)
+            : socket_(std::move(socket)), browser_(browser), buffer_(MAX_WIRE_LINE_LENGTH)
+        {}
+
+        void start()
+        {
+            auto self = shared_from_this();
+            boost::asio::async_read_until(socket_, buffer_, '\n',
+                [this, self](boost::system::error_code ec, std::size_t)
+                {
+                    if (ec)
+                        return;
+
+                    std::istream is(&buffer_);
+                    std::string line;
+                    std::getline(is, line);
+                    strip_wire_newline(line);
+
+                    std::string decoded;
+                    std::vector<std::string> responses;
+                    if (!try_decode_base64(line, decoded))
+                        responses = { "ERROR|Invalid framing" };
+                    else
+                        responses = browser_.process_request(decoded);
+
+                    write_payload_.clear();
+                    for (const auto& response : responses)
+                        write_payload_ += encode_base64(response) + "\n";
+
+                    boost::asio::async_write(socket_, boost::asio::buffer(write_payload_),
+                        [this, self](boost::system::error_code, std::size_t)
+                        {
+                            boost::system::error_code ignored;
+                            socket_.shutdown(tcp::socket::shutdown_both, ignored);
+                            socket_.close(ignored);
+                        });
+                });
+        }
+
+    private:
+        tcp::socket socket_;
+        ServerBrowser& browser_;
+        boost::asio::streambuf buffer_;
+        std::string write_payload_;
+    };
+
+    void accept_loop()
+    {
+        acceptor_.async_accept(
+            [this](boost::system::error_code ec, tcp::socket socket)
+            {
+                if (!ec)
+                    std::make_shared<Session>(std::move(socket), *this)->start();
+
+                if (acceptor_.is_open())
+                    accept_loop();
+            });
+    }
+
+    void remove_stale_locked() const
+    {
+        auto now = std::chrono::system_clock::now();
+        for (auto it = entries_.begin(); it != entries_.end();)
+        {
+            if (now - it->second.updated_at > std::chrono::seconds(BROWSER_ENTRY_TTL_SECONDS))
+                it = entries_.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    boost::asio::io_context& io_;
+    tcp::acceptor acceptor_;
+    mutable std::mutex entries_mutex_;
+    mutable std::map<std::string, BrowserEntry> entries_;
+};
+
+class ServerBrowserClient
+{
+public:
+    static bool register_server(
+        const std::string& browser_host,
+        uint16_t browser_port,
+        const BrowserEntry& entry,
+        std::string& error)
+    {
+        std::string request = "REGISTER|" + sanitize_browser_field(entry.name, BROWSER_NAME_MAX_LEN)
+            + "|" + sanitize_browser_field(entry.host, HOST_MAX_LEN)
+            + "|" + std::to_string(entry.port)
+            + "|" + (entry.has_password ? "1" : "0")
+            + "|" + std::to_string(std::max(0, entry.users));
+
+        std::vector<std::string> response;
+        if (!send_request(browser_host, browser_port, request, response, error))
+            return false;
+
+        if (!response.empty() && response[0] == "OK")
+            return true;
+
+        error = response.empty() ? "No browser response" : response[0];
+        return false;
+    }
+
+    static bool unregister_server(
+        const std::string& browser_host,
+        uint16_t browser_port,
+        const BrowserEntry& entry)
+    {
+        std::string ignored;
+        std::vector<std::string> response;
+        std::string request = "UNREGISTER|" + sanitize_browser_field(entry.host, HOST_MAX_LEN)
+            + "|" + std::to_string(entry.port)
+            + "|" + sanitize_browser_field(entry.name, BROWSER_NAME_MAX_LEN);
+        return send_request(browser_host, browser_port, request, response, ignored);
+    }
+
+    static bool list_servers(
+        const std::string& browser_host,
+        uint16_t browser_port,
+        std::vector<BrowserEntry>& entries,
+        std::string& error)
+    {
+        std::vector<std::string> response;
+        if (!send_request(browser_host, browser_port, "LIST", response, error))
+            return false;
+
+        entries.clear();
+        for (const auto& line : response)
+        {
+            if (line == "END")
+                return true;
+
+            auto parts = split(line, '|');
+            if (parts.size() < 7 || parts[0] != "SERVER")
+                continue;
+
+            BrowserEntry entry;
+            entry.name = parts[1];
+            entry.host = parts[2];
+            if (!parse_u16_field(parts[3], entry.port))
+                continue;
+            entry.has_password = parts[4] == "1";
+            try { entry.users = std::max(0, std::stoi(parts[5])); }
+            catch (...) { entry.users = 0; }
+            try
+            {
+                int age = std::max(0, std::stoi(parts[6]));
+                entry.updated_at = std::chrono::system_clock::now() - std::chrono::seconds(age);
+            }
+            catch (...)
+            {
+                entry.updated_at = std::chrono::system_clock::now();
+            }
+            entries.push_back(entry);
+        }
+
+        error = "Browser response did not include END";
+        return false;
+    }
+
+private:
+    static bool send_request(
+        const std::string& browser_host,
+        uint16_t browser_port,
+        const std::string& request,
+        std::vector<std::string>& response,
+        std::string& error)
+    {
+        try
+        {
+            boost::asio::io_context io;
+            tcp::resolver resolver(io);
+            tcp::socket socket(io);
+            auto endpoints = resolver.resolve(browser_host, std::to_string(browser_port));
+            boost::asio::connect(socket, endpoints);
+
+            std::string payload = encode_base64(request) + "\n";
+            boost::asio::write(socket, boost::asio::buffer(payload));
+
+            boost::asio::streambuf buffer(MAX_WIRE_LINE_LENGTH);
+            boost::system::error_code ec;
+            while (true)
+            {
+                boost::asio::read_until(socket, buffer, '\n', ec);
+                if (ec)
+                    break;
+
+                std::istream is(&buffer);
+                std::string line;
+                std::getline(is, line);
+                strip_wire_newline(line);
+
+                std::string decoded;
+                if (try_decode_base64(line, decoded))
+                    response.push_back(decoded);
+            }
+
+            if (response.empty())
+            {
+                error = "No response from browser server";
+                return false;
+            }
+            return true;
+        }
+        catch (const std::exception& ex)
+        {
+            error = ex.what();
+            return false;
+        }
+        catch (...)
+        {
+            error = "Unknown browser connection error";
+            return false;
+        }
+    }
+};
+
+class ServerBrowserPublisher
+{
+public:
+    ServerBrowserPublisher(
+        std::string browser_host,
+        uint16_t browser_port,
+        BrowserEntry entry,
+        std::function<int()> users_provider)
+        : browser_host_(std::move(browser_host)),
+        browser_port_(browser_port),
+        entry_(std::move(entry)),
+        users_provider_(std::move(users_provider))
+    {}
+
+    ~ServerBrowserPublisher()
+    {
+        stop();
+    }
+
+    bool start(std::string& error)
+    {
+        if (started_)
+            return true;
+
+        entry_.users = current_users();
+        if (!ServerBrowserClient::register_server(browser_host_, browser_port_, entry_, error))
+            return false;
+
+        started_ = true;
+        stop_requested_ = false;
+        worker_ = std::thread([this] { publish_loop(); });
+        return true;
+    }
+
+    void stop()
+    {
+        if (!started_)
+            return;
+
+        stop_requested_ = true;
+        if (worker_.joinable())
+            worker_.join();
+
+        ServerBrowserClient::unregister_server(browser_host_, browser_port_, entry_);
+        started_ = false;
+    }
+
+private:
+    int current_users() const
+    {
+        return users_provider_ ? users_provider_() : 0;
+    }
+
+    void publish_loop()
+    {
+        while (!stop_requested_)
+        {
+            for (int i = 0; i < BROWSER_PUBLISH_INTERVAL_SECONDS && !stop_requested_; ++i)
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            if (stop_requested_)
+                break;
+
+            BrowserEntry entry = entry_;
+            entry.users = current_users();
+            std::string ignored;
+            ServerBrowserClient::register_server(browser_host_, browser_port_, entry, ignored);
+        }
+    }
+
+    std::string browser_host_;
+    uint16_t browser_port_ = BROWSER_PORT;
+    BrowserEntry entry_;
+    std::function<int()> users_provider_;
+    std::atomic<bool> stop_requested_{ false };
+    bool started_ = false;
+    std::thread worker_;
+};
 
 // =====================================================
 // Forward declarations
@@ -1874,9 +2358,13 @@ struct DedicatedServerConfig
     std::string logfile = "chatlog.txt";
     std::string bans_file = "bans.txt";
     std::string identities_file = "identities.txt";
+    std::string browser_host;
+    std::string browser_name = "chatbox dedicated server";
+    std::string browser_public_host;
     bool enable_logging = true;
     bool log_to_stdout_only = false;
     bool enable_upnp = true;
+    bool publish_to_browser = false;
 };
 
 void show_dedicated_usage()
@@ -1884,11 +2372,16 @@ void show_dedicated_usage()
     std::cout
         << "Usage:\n"
         << "  chatbox --server <port> [password] [logfile] [options]\n"
-        << "  chatbox --dedicated <port> [password] [logfile] [options]\n\n"
+        << "  chatbox --dedicated <port> [password] [logfile] [options]\n"
+        << "  chatbox --browser\n"
+        << "  chatbox --browse <browser-host>\n\n"
         << "Options:\n"
         << "  --password <password>  - set the room password\n"
         << "  --log <file>           - write logs to a file\n"
         << "  --identities <file>    - store nickname identity keys in a file\n"
+        << "  --publish <host>     - publish this server to a browser server on port 2727\n"
+        << "  --name <name>          - room name shown in the server browser\n"
+        << "  --public-host <host>   - host/address clients should connect to from browser results\n"
         << "  --log-stdout           - print logs only to stdout\n"
         << "  --no-log               - disable chat logging\n"
         << "  --no-upnp              - skip UPnP port forwarding\n\n"
@@ -1924,6 +2417,112 @@ bool parse_port(const std::string& text, uint16_t& port)
     {
         return false;
     }
+}
+
+bool parse_browser_address(const std::string& text, std::string& host)
+{
+    if (text.empty())
+        return false;
+
+    if (text.find(':') != std::string::npos)
+        return false;
+
+    host = text;
+    return true;
+}
+
+std::string browser_entry_summary(const BrowserEntry& entry)
+{
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() - entry.updated_at).count();
+
+    return entry.name + " | " + entry.host + ":" + std::to_string(entry.port)
+        + " | users " + std::to_string(entry.users)
+        + (entry.has_password ? " | password" : " | open")
+        + " | seen " + std::to_string(std::max<long long>(0, age)) + "s ago";
+}
+
+void show_browser_usage()
+{
+    std::cout
+        << "Server browser commands:\n"
+        << "  /servers               - list published servers\n"
+        << "  /quit                  - shut down the browser server\n"
+        << "  /help                  - show this help\n";
+}
+
+void browser_console(ServerBrowser& browser, std::atomic<bool>& quit_flag)
+{
+    show_browser_usage();
+
+    std::string line;
+    while (!quit_flag && std::getline(std::cin, line))
+    {
+        if (line == "/quit" || line == "/exit")
+        {
+            quit_flag = true;
+            break;
+        }
+        else if (line == "/help")
+        {
+            show_browser_usage();
+        }
+        else if (line == "/servers")
+        {
+            auto entries = browser.entries();
+            if (entries.empty())
+            {
+                std::cout << "(no servers published)\n";
+                continue;
+            }
+
+            for (const auto& entry : entries)
+                std::cout << "  - " << browser_entry_summary(entry) << "\n";
+        }
+        else if (!line.empty())
+        {
+            std::cout << "Unknown command. Type /help for a list.\n";
+        }
+    }
+}
+
+int run_browser_server(uint16_t port)
+{
+    boost::asio::io_context io;
+    ServerBrowser browser(io, port);
+
+    std::cout << "chatbox server browser running on port " << port << "\n";
+    std::atomic<bool> quit_flag(false);
+    std::thread network_thread([&] { io.run(); });
+
+    browser_console(browser, quit_flag);
+
+    browser.stop();
+    io.stop();
+    network_thread.join();
+    return 0;
+}
+
+int run_browser_list(const std::string& host, uint16_t port)
+{
+    std::vector<BrowserEntry> entries;
+    std::string error;
+    if (!ServerBrowserClient::list_servers(host, port, entries, error))
+    {
+        std::cerr << "Could not query browser server: " << error << "\n";
+        return 1;
+    }
+
+    if (entries.empty())
+    {
+        std::cout << "(no servers published)\n";
+        return 0;
+    }
+
+    for (size_t i = 0; i < entries.size(); ++i)
+        std::cout << (i + 1) << ". " << browser_entry_summary(entries[i]) << "\n";
+
+    return 0;
 }
 
 void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
@@ -2028,13 +2627,18 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     server.load_bans(config.bans_file);
 
     UPnPMapper upnp;
+    std::string publish_host = config.browser_public_host;
     if (config.enable_upnp && upnp.discover())
     {
         if (upnp.openPortBoth(std::to_string(config.port), "chatbox dedicated server"))
         {
             log_admin("[admin] UPnP port mapping succeeded");
             if (!upnp.externalIP().empty())
+            {
                 log_admin("[admin] External address: " + upnp.externalIP() + ":" + std::to_string(config.port));
+                if (publish_host.empty())
+                    publish_host = upnp.externalIP();
+            }
         }
         else
         {
@@ -2062,10 +2666,46 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
         {
             auto addr = result.endpoint().address();
             if (!addr.is_loopback())
+            {
                 log_admin("[admin]   " + addr.to_string() + ":" + std::to_string(config.port));
+                if (publish_host.empty())
+                    publish_host = addr.to_string();
+            }
         }
     }
     catch (...) {}
+
+    std::unique_ptr<ServerBrowserPublisher> publisher;
+    if (config.publish_to_browser)
+    {
+        if (publish_host.empty())
+            publish_host = "127.0.0.1";
+
+        BrowserEntry entry;
+        entry.name = config.browser_name;
+        entry.host = publish_host;
+        entry.port = config.port;
+        entry.has_password = !config.password.empty();
+
+        publisher = std::make_unique<ServerBrowserPublisher>(
+            config.browser_host,
+            BROWSER_PORT,
+            entry,
+            [&server] { return static_cast<int>(server.connected_users().size()); });
+
+        std::string error;
+        if (publisher->start(error))
+        {
+            log_admin("[admin] Published to server browser "
+                + config.browser_host + ":" + std::to_string(BROWSER_PORT)
+                + " as " + entry.host + ":" + std::to_string(entry.port));
+        }
+        else
+        {
+            log_admin("[admin] Browser publish failed: " + error);
+            publisher.reset();
+        }
+    }
 
     std::cout << "chatbox dedicated server running on port " << config.port << "\n";
     std::cout << "Log: ";
@@ -2084,6 +2724,7 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     admin_console(server, quit_flag);
 
     log_admin("[admin] Shutting down");
+    publisher.reset();
     server.stop();
     io.stop();
     network_thread.join();
@@ -2144,12 +2785,33 @@ int run_dedicated_server(int argc, char* argv[])
         {
             config.identities_file = argv[++i];
         }
+        else if (arg == "--publish" && i + 1 < argc)
+        {
+            if (!parse_browser_address(argv[++i], config.browser_host))
+            {
+                std::cerr << "Invalid browser address\n";
+                show_dedicated_usage();
+                return 1;
+            }
+            config.publish_to_browser = true;
+        }
+        else if (arg == "--name" && i + 1 < argc)
+        {
+            config.browser_name = sanitize_browser_field(argv[++i], BROWSER_NAME_MAX_LEN);
+            if (config.browser_name.empty())
+                config.browser_name = "chatbox dedicated server";
+        }
+        else if (arg == "--public-host" && i + 1 < argc)
+        {
+            config.browser_public_host = sanitize_browser_field(argv[++i], HOST_MAX_LEN);
+        }
         else if (arg == "--help" || arg == "-h")
         {
             show_dedicated_usage();
             return 0;
         }
-        else if (arg == "--password" || arg == "--log" || arg == "--identities")
+        else if (arg == "--password" || arg == "--log" || arg == "--identities"
+            || arg == "--publish" || arg == "--name" || arg == "--public-host")
         {
             std::cerr << arg << " requires a value\n";
             show_dedicated_usage();
@@ -2200,6 +2862,33 @@ int main(int argc, char* argv[])
         if (mode == "--server" || mode == "--dedicated" || mode == "-s")
             return run_dedicated_server(argc, argv);
 
+        if (mode == "--browser")
+        {
+            if (argc >= 3)
+            {
+                std::cerr << "--browser uses fixed port " << BROWSER_PORT << " and takes no port argument\n";
+                return 1;
+            }
+            return run_browser_server(BROWSER_PORT);
+        }
+
+        if (mode == "--browse")
+        {
+            if (argc < 3)
+            {
+                show_dedicated_usage();
+                return 1;
+            }
+
+            std::string browser_host = argv[2];
+            if (argc >= 4)
+            {
+                std::cerr << "--browse uses fixed browser port " << BROWSER_PORT << "\n";
+                return 1;
+            }
+            return run_browser_list(browser_host, BROWSER_PORT);
+        }
+
         if (mode == "--help" || mode == "-h")
         {
             show_dedicated_usage();
@@ -2216,6 +2905,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<ChatServer> server;
     std::unique_ptr<ChatClient> client;
     std::unique_ptr<UPnPMapper> upnp;
+    std::unique_ptr<ServerBrowserPublisher> browser_publisher;
 
     initscr();
     cbreak();
@@ -2239,7 +2929,8 @@ int main(int argc, char* argv[])
         mvprintw(2, 4, "chatbox alpha");
         mvprintw(4, 4, "[C] Chat mode");
         mvprintw(5, 4, "[D] Dedicated server");
-        mvprintw(6, 4, "[Q] Quit");
+        mvprintw(6, 4, "[B] Browser server");
+        mvprintw(7, 4, "[Q] Quit");
         refresh();
 
         int ch = getch();
@@ -2279,6 +2970,25 @@ int main(int argc, char* argv[])
             getnstr(logfile_buf, LOGFILE_MAX_LEN);
             noecho();
 
+            bool publish_to_browser = prompt_yes_no(15, 4, "Publish to a browser server on port 2727? [y/N]:", false);
+            char browser_host_buf[HOST_BUF_SIZE] = {};
+            char browser_name_buf[HOST_BUF_SIZE] = {};
+            char public_host_buf[HOST_BUF_SIZE] = {};
+            if (publish_to_browser)
+            {
+                echo();
+                mvprintw(17, 4, "Browser server IP:");
+                move(18, 4);
+                getnstr(browser_host_buf, HOST_MAX_LEN);
+                mvprintw(20, 4, "Room name (blank default):");
+                move(21, 4);
+                getnstr(browser_name_buf, HOST_MAX_LEN);
+                mvprintw(23, 4, "Public IP/address clients should use (blank auto):");
+                move(24, 4);
+                getnstr(public_host_buf, HOST_MAX_LEN);
+                noecho();
+            }
+
             uint16_t port = 0;
             if (!parse_port(port_buf, port))
             {
@@ -2294,6 +3004,7 @@ int main(int argc, char* argv[])
             config.port = port;
             config.password = room_password;
             config.enable_upnp = enable_upnp;
+            config.publish_to_browser = publish_to_browser;
 
             std::string logfile = logfile_buf;
             if (logfile == "none")
@@ -2309,8 +3020,38 @@ int main(int argc, char* argv[])
                 config.logfile = logfile;
             }
 
+            if (publish_to_browser)
+            {
+                config.browser_host = browser_host_buf;
+                if (config.browser_host.empty())
+                {
+                    erase();
+                    box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Browser server IP is required to publish.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                if (std::string(browser_name_buf).empty())
+                    config.browser_name = "chatbox dedicated server";
+                else
+                    config.browser_name = sanitize_browser_field(browser_name_buf, BROWSER_NAME_MAX_LEN);
+                config.browser_public_host = sanitize_browser_field(public_host_buf, HOST_MAX_LEN);
+            }
+
             endwin();
             return run_dedicated_server_config(config);
+        }
+        else if (ch == 'b' || ch == 'B')
+        {
+            erase();
+            box(stdscr, 0, 0);
+            mvprintw(2, 4, "Starting browser server on port %d...", BROWSER_PORT);
+            refresh();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            endwin();
+            return run_browser_server(BROWSER_PORT);
         }
     }
 
@@ -2366,7 +3107,8 @@ int main(int argc, char* argv[])
         mvprintw(2, 4, "chatbox alpha");
         mvprintw(4, 4, "[H] Host server");
         mvprintw(5, 4, "[J] Join server");
-        mvprintw(6, 4, "[Q] Quit");
+        mvprintw(6, 4, "[B] Browse servers");
+        mvprintw(7, 4, "[Q] Quit");
         refresh();
 
         int ch = getch();
@@ -2398,6 +3140,25 @@ int main(int argc, char* argv[])
 
             bool enable_upnp = prompt_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
 
+            bool publish_to_browser = prompt_yes_no(12, 4, "Publish to a browser server on port 2727? [y/N]:", false);
+            char browser_host_buf[HOST_BUF_SIZE] = {};
+            char browser_name_buf[HOST_BUF_SIZE] = {};
+            char public_host_buf[HOST_BUF_SIZE] = {};
+            if (publish_to_browser)
+            {
+                echo();
+                mvprintw(14, 4, "Browser server IP:");
+                move(15, 4);
+                getnstr(browser_host_buf, HOST_MAX_LEN);
+                mvprintw(17, 4, "Room name (blank uses nickname):");
+                move(18, 4);
+                getnstr(browser_name_buf, HOST_MAX_LEN);
+                mvprintw(20, 4, "Public IP/address clients should use (blank auto):");
+                move(21, 4);
+                getnstr(public_host_buf, HOST_MAX_LEN);
+                noecho();
+            }
+
             try
             {
                 uint16_t port = 0;
@@ -2408,6 +3169,19 @@ int main(int argc, char* argv[])
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     continue;
+                }
+
+                std::string browser_host = browser_host_buf;
+                if (publish_to_browser)
+                {
+                    if (browser_host.empty())
+                    {
+                        erase(); box(stdscr, 0, 0);
+                        mvprintw(2, 4, "Browser server IP is required to publish.");
+                        refresh();
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        continue;
+                    }
                 }
 
                 server = std::make_unique<ChatServer>(
@@ -2434,6 +3208,8 @@ int main(int argc, char* argv[])
                 if (!room_password.empty())
                     push_message("[system] Room password protection enabled");
 
+                std::string publish_host = sanitize_browser_field(public_host_buf, HOST_MAX_LEN);
+
                 // UPnP
                 if (enable_upnp)
                 {
@@ -2449,6 +3225,8 @@ int main(int argc, char* argv[])
                             {
                                 push_message("[system] External address: " + upnp->externalIP() + ":" + std::to_string(port));
                                 push_message("[system] Share that address with your peer");
+                                if (publish_host.empty())
+                                    publish_host = upnp->externalIP();
                             }
                         }
                         else
@@ -2478,10 +3256,47 @@ int main(int argc, char* argv[])
                     {
                         auto addr = r.endpoint().address();
                         if (!addr.is_loopback())
+                        {
                             push_message("[system]   " + addr.to_string() + ":" + std::to_string(port));
+                            if (publish_host.empty())
+                                publish_host = addr.to_string();
+                        }
                     }
                 }
                 catch (...) {}
+
+                if (publish_to_browser)
+                {
+                    if (publish_host.empty())
+                        publish_host = "127.0.0.1";
+
+                    BrowserEntry entry;
+                    entry.name = std::string(browser_name_buf).empty()
+                        ? g_nickname + "'s room"
+                        : sanitize_browser_field(browser_name_buf, BROWSER_NAME_MAX_LEN);
+                    entry.host = publish_host;
+                    entry.port = port;
+                    entry.has_password = !room_password.empty();
+
+                    browser_publisher = std::make_unique<ServerBrowserPublisher>(
+                        browser_host,
+                        BROWSER_PORT,
+                        entry,
+                        [] { return static_cast<int>(connected_users().size()); });
+
+                    std::string error;
+                    if (browser_publisher->start(error))
+                    {
+                        push_message("[system] Published to browser "
+                            + browser_host + ":" + std::to_string(BROWSER_PORT)
+                            + " as " + entry.host + ":" + std::to_string(entry.port));
+                    }
+                    else
+                    {
+                        push_message("[system] Browser publish failed: " + error);
+                        browser_publisher.reset();
+                    }
+                }
 
                 configured = true;
             }
@@ -2495,31 +3310,108 @@ int main(int argc, char* argv[])
             }
         }
 
-        // ---- JOIN ----
-        else if (ch == 'j' || ch == 'J')
+        // ---- JOIN / BROWSE ----
+        else if (ch == 'j' || ch == 'J' || ch == 'b' || ch == 'B')
         {
-            echo();
+            std::string selected_host;
+            uint16_t selected_port = 0;
 
-            char host_buf[HOST_BUF_SIZE];
-            char port_buf[PORT_BUF_SIZE];
-
-            erase();
-            box(stdscr, 0, 0);
-            mvprintw(2, 4, "Join Server");
-            mvprintw(4, 4, "Host:");
-            move(5, 4);
-            getnstr(host_buf, HOST_MAX_LEN);
-
-            mvprintw(7, 4, "Port:");
-            move(8, 4);
-            getnstr(port_buf, PORT_MAX_LEN);
-
-            noecho();
-
-            try
+            if (ch == 'b' || ch == 'B')
             {
-                uint16_t port = 0;
-                if (!parse_port(port_buf, port))
+                echo();
+                char browser_host_buf[HOST_BUF_SIZE] = {};
+
+                erase();
+                box(stdscr, 0, 0);
+                mvprintw(2, 4, "Browse Servers");
+                mvprintw(4, 4, "Browser server IP:");
+                move(5, 4);
+                getnstr(browser_host_buf, HOST_MAX_LEN);
+                noecho();
+
+                std::string browser_host = browser_host_buf;
+                if (browser_host.empty())
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Browser server IP is required.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                std::vector<BrowserEntry> entries;
+                std::string error;
+                if (!ServerBrowserClient::list_servers(browser_host, BROWSER_PORT, entries, error))
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Could not query browser: %s", error.c_str());
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                    continue;
+                }
+
+                if (entries.empty())
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "No servers are published there right now.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                erase();
+                box(stdscr, 0, 0);
+                mvprintw(2, 4, "Published Servers");
+                int row = 4;
+                for (size_t i = 0; i < entries.size() && row < LINES - 3; ++i)
+                {
+                    mvprintw(row++, 4, "%zu) %s", i + 1, browser_entry_summary(entries[i]).c_str());
+                }
+                echo();
+                char choice_buf[PORT_BUF_SIZE] = {};
+                mvprintw(row + 1, 4, "Choose number:");
+                move(row + 2, 4);
+                getnstr(choice_buf, PORT_MAX_LEN);
+                noecho();
+
+                int choice = 0;
+                try { choice = std::stoi(choice_buf); }
+                catch (...) { choice = 0; }
+
+                if (choice < 1 || choice > static_cast<int>(entries.size()))
+                {
+                    erase(); box(stdscr, 0, 0);
+                    mvprintw(2, 4, "Invalid server selection.");
+                    refresh();
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    continue;
+                }
+
+                selected_host = entries[choice - 1].host;
+                selected_port = entries[choice - 1].port;
+            }
+            else
+            {
+                echo();
+
+                char host_buf[HOST_BUF_SIZE] = {};
+                char port_buf[PORT_BUF_SIZE] = {};
+
+                erase();
+                box(stdscr, 0, 0);
+                mvprintw(2, 4, "Join Server");
+                mvprintw(4, 4, "Host:");
+                move(5, 4);
+                getnstr(host_buf, HOST_MAX_LEN);
+
+                mvprintw(7, 4, "Port:");
+                move(8, 4);
+                getnstr(port_buf, PORT_MAX_LEN);
+
+                noecho();
+
+                selected_host = host_buf;
+                if (!parse_port(port_buf, selected_port))
                 {
                     erase(); box(stdscr, 0, 0);
                     mvprintw(2, 4, "Invalid port number (0-65535)");
@@ -2527,11 +3419,14 @@ int main(int argc, char* argv[])
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     continue;
                 }
+            }
 
+            try
+            {
                 client = std::make_unique<ChatClient>(io);
                 client->set_identity(local_identity);
 
-                if (!client->connect(host_buf, port))
+                if (!client->connect(selected_host, selected_port))
                 {
                     mvprintw(10, 4, "Connection failed.");
                     refresh();
@@ -2623,7 +3518,7 @@ int main(int argc, char* argv[])
                 }
 
                 add_user(g_nickname);
-                push_message("[system] Connected to " + std::string(host_buf));
+                push_message("[system] Connected to " + selected_host + ":" + std::to_string(selected_port));
                 push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
                 configured = true;
 
@@ -2900,6 +3795,7 @@ int main(int argc, char* argv[])
     // =========================================
 
     g_shutdown_requested = true;
+    browser_publisher.reset();
     upnp.reset();
 
     {
