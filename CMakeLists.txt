@@ -31,7 +31,29 @@ find_package(unofficial-sodium CONFIG REQUIRED)
 # =====================================================
 # chatbox  (full client + embedded host, uses ncurses)
 # =====================================================
-add_executable(chatbox "chatbox.cpp")
+add_executable(chatbox
+  "app_state.cpp"
+  "app_state.h"
+  "chat_client.h"
+  "chat_log.h"
+  "chat_server.h"
+  "chatbox.cpp"
+  "client_session.cpp"
+  "commands.cpp"
+  "commands.h"
+  "common.h"
+  "dedicated_server.cpp"
+  "dedicated_server.h"
+  "interactive_app.cpp"
+  "interactive_app.h"
+  "server_browser.cpp"
+  "server_browser.h"
+  "ui.cpp"
+  "ui.h"
+  "upnp_mapper.h"
+  "utils.cpp"
+  "utils.h"
+)
 
 target_link_libraries(chatbox PRIVATE Boost::asio)
 target_link_libraries(chatbox PRIVATE unofficial::pdcurses::pdcurses)
