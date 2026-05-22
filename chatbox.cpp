@@ -85,5 +85,5 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    return run_curses_app();
+    return run_gui_app(argc, argv);
 }
