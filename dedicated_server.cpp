@@ -88,7 +88,13 @@ void show_browser_usage()
         << "  /help                  - show this help\n";
 }
 
-void browser_console(ServerBrowser& browser, std::atomic<bool>& quit_flag)
+enum class ConsoleExitReason
+{
+    QuitRequested,
+    InputClosed
+};
+
+ConsoleExitReason browser_console(ServerBrowser& browser, std::atomic<bool>& quit_flag)
 {
     show_browser_usage();
 
@@ -98,7 +104,7 @@ void browser_console(ServerBrowser& browser, std::atomic<bool>& quit_flag)
         if (line == "/quit" || line == "/exit")
         {
             quit_flag = true;
-            break;
+            return ConsoleExitReason::QuitRequested;
         }
         else if (line == "/help")
         {
@@ -121,6 +127,8 @@ void browser_console(ServerBrowser& browser, std::atomic<bool>& quit_flag)
             std::cout << "Unknown command. Type /help for a list.\n";
         }
     }
+
+    return ConsoleExitReason::InputClosed;
 }
 
 int run_browser_server(uint16_t port)
@@ -170,7 +178,14 @@ int run_browser_server(uint16_t port)
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
 
-    browser_console(browser, quit_flag);
+    const auto console_exit = browser_console(browser, quit_flag);
+
+    if (console_exit == ConsoleExitReason::InputClosed && !quit_flag)
+    {
+        std::cout << "[browser] Console input closed; server is still running. Stop the process to exit.\n";
+        network_thread.join();
+        return 0;
+    }
 
     browser.stop();
     io.stop();
@@ -200,7 +215,7 @@ int run_browser_list(const std::string& host, uint16_t port)
     return 0;
 }
 
-void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
+ConsoleExitReason admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
 {
     show_dedicated_usage();
 
@@ -219,7 +234,7 @@ void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
         if (cmd == "/quit" || cmd == "/exit")
         {
             quit_flag = true;
-            break;
+            return ConsoleExitReason::QuitRequested;
         }
         else if (cmd == "/help")
         {
@@ -272,6 +287,8 @@ void admin_console(ChatServer& server, std::atomic<bool>& quit_flag)
             std::cout << "Unknown command. Type /help for a list.\n";
         }
     }
+
+    return ConsoleExitReason::InputClosed;
 }
 
 int run_dedicated_server_config(const DedicatedServerConfig& config)
@@ -396,7 +413,14 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
 
-    admin_console(server, quit_flag);
+    const auto console_exit = admin_console(server, quit_flag);
+
+    if (console_exit == ConsoleExitReason::InputClosed && !quit_flag)
+    {
+        log_admin("[admin] Console input closed; dedicated server is still running. Stop the process to exit.");
+        network_thread.join();
+        return 0;
+    }
 
     log_admin("[admin] Shutting down");
     publisher.reset();
