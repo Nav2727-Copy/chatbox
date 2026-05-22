@@ -24,42 +24,71 @@ endif()
 
 # ---- Packages ----
 find_package(Boost REQUIRED COMPONENTS asio)
+find_package(FLTK CONFIG REQUIRED)
 find_package(unofficial-pdcurses CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
 
-# =====================================================
-# chatbox  (full client + embedded host, uses ncurses)
-# =====================================================
-add_executable(chatbox
+set(CHATBOX_CORE_SOURCES
   "app_state.cpp"
   "app_state.h"
   "chat_client.h"
   "chat_log.h"
   "chat_server.h"
-  "chatbox.cpp"
   "client_session.cpp"
   "commands.cpp"
   "commands.h"
   "common.h"
   "dedicated_server.cpp"
   "dedicated_server.h"
-  "interactive_app.cpp"
-  "interactive_app.h"
   "server_browser.cpp"
   "server_browser.h"
-  "ui.cpp"
-  "ui.h"
   "upnp_mapper.h"
   "utils.cpp"
   "utils.h"
 )
 
-target_link_libraries(chatbox PRIVATE Boost::asio)
-target_link_libraries(chatbox PRIVATE unofficial::pdcurses::pdcurses)
-target_link_libraries(chatbox PRIVATE miniupnpc::miniupnpc)
-target_link_libraries(chatbox PRIVATE unofficial-sodium::sodium)
+add_library(chatbox_core STATIC ${CHATBOX_CORE_SOURCES})
+target_link_libraries(chatbox_core
+  PUBLIC
+    Boost::asio
+    miniupnpc::miniupnpc
+    unofficial-sodium::sodium
+)
+target_compile_features(chatbox_core PUBLIC cxx_std_20)
 
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET chatbox PROPERTY CXX_STANDARD 20)
-endif()
+add_library(chatbox_curses_frontend STATIC
+  "curses_app.h"
+  "curses_ui.cpp"
+  "curses_ui.h"
+  "interactive_app.cpp"
+  "interactive_app.h"
+)
+target_link_libraries(chatbox_curses_frontend
+  PUBLIC
+    chatbox_core
+  PRIVATE
+    unofficial::pdcurses::pdcurses
+)
+target_compile_features(chatbox_curses_frontend PUBLIC cxx_std_20)
+
+add_library(chatbox_gui_frontend STATIC
+  "gui_app.cpp"
+  "gui_app.h"
+)
+target_link_libraries(chatbox_gui_frontend PUBLIC chatbox_core)
+target_link_libraries(chatbox_gui_frontend PRIVATE fltk)
+target_compile_features(chatbox_gui_frontend PUBLIC cxx_std_20)
+
+# =====================================================
+# chatbox  (app launcher + selectable frontend)
+# =====================================================
+add_executable(chatbox "chatbox.cpp")
+
+target_link_libraries(chatbox
+  PRIVATE
+    chatbox_core
+    chatbox_curses_frontend
+    chatbox_gui_frontend
+)
+target_compile_features(chatbox PRIVATE cxx_std_20)

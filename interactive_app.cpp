@@ -1,16 +1,19 @@
-#include "interactive_app.h"
+#include "curses_app.h"
 
 #include "app_state.h"
 #include "chat_client.h"
 #include "chat_server.h"
 #include "commands.h"
+#include "interactive_app.h"
 #include "dedicated_server.h"
 #include "server_browser.h"
-#include "ui.h"
+#include "curses_ui.h"
 #include "upnp_mapper.h"
 #include "utils.h"
 
-int run_interactive_app()
+#include <curses.h>
+
+int run_curses_app()
 {
     boost::asio::io_context io;
 
@@ -19,15 +22,7 @@ int run_interactive_app()
     std::unique_ptr<UPnPMapper> upnp;
     std::unique_ptr<ServerBrowserPublisher> browser_publisher;
 
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    start_color();
-
-    init_pair(1, COLOR_CYAN, COLOR_BLACK);
-    init_pair(2, COLOR_GREEN, COLOR_BLACK);
-    init_pair(3, COLOR_YELLOW, COLOR_BLACK);
+    initialize_curses_ui();
 
     // =========================================
     // Startup mode prompt
@@ -49,7 +44,7 @@ int run_interactive_app()
 
         if (ch == 'q' || ch == 'Q')
         {
-            endwin();
+            shutdown_curses_ui();
             return 0;
         }
         else if (ch == 'c' || ch == 'C')
@@ -71,10 +66,10 @@ int run_interactive_app()
             getnstr(port_buf, PORT_MAX_LEN);
 
             noecho();
-            std::string room_password = prompt_password(7, 4,
+            std::string room_password = prompt_curses_password(7, 4,
                 "Room password (leave blank for none):");
 
-            bool enable_upnp = prompt_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
+            bool enable_upnp = prompt_curses_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
 
             echo();
             mvprintw(12, 4, "Log file (blank chatlog.txt, 'none' disables, 'stdout' console only):");
@@ -82,7 +77,7 @@ int run_interactive_app()
             getnstr(logfile_buf, LOGFILE_MAX_LEN);
             noecho();
 
-            bool publish_to_browser = prompt_yes_no(15, 4, "Publish to a browser server on port 2727? [y/N]:", false);
+            bool publish_to_browser = prompt_curses_yes_no(15, 4, "Publish to a browser server on port 2727? [y/N]:", false);
             char browser_host_buf[HOST_BUF_SIZE] = {};
             char browser_name_buf[HOST_BUF_SIZE] = {};
             char public_host_buf[HOST_BUF_SIZE] = {};
@@ -151,7 +146,7 @@ int run_interactive_app()
                 config.browser_public_host = sanitize_browser_field(public_host_buf, HOST_MAX_LEN);
             }
 
-            endwin();
+            shutdown_curses_ui();
             return run_dedicated_server_config(config);
         }
         else if (ch == 'b' || ch == 'B')
@@ -161,7 +156,7 @@ int run_interactive_app()
             mvprintw(2, 4, "Starting browser server on port %d...", BROWSER_PORT);
             refresh();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            endwin();
+            shutdown_curses_ui();
             return run_browser_server(BROWSER_PORT);
         }
     }
@@ -198,7 +193,7 @@ int run_interactive_app()
     bool identity_created = false;
     if (!load_or_create_identity(g_nickname, local_identity, identity_created))
     {
-        endwin();
+        shutdown_curses_ui();
         std::cerr << "Could not load or create local identity key for " << g_nickname << "\n";
         return 1;
     }
@@ -226,7 +221,7 @@ int run_interactive_app()
 
         if (ch == 'q' || ch == 'Q')
         {
-            endwin();
+            shutdown_curses_ui();
             return 0;
         }
 
@@ -246,12 +241,12 @@ int run_interactive_app()
             noecho();
 
             // Password setup (optional)
-            std::string room_password = prompt_password(7, 4,
+            std::string room_password = prompt_curses_password(7, 4,
                 "Room password (leave blank for none):");
 
-            bool enable_upnp = prompt_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
+            bool enable_upnp = prompt_curses_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
 
-            bool publish_to_browser = prompt_yes_no(12, 4, "Publish to a browser server on port 2727? [y/N]:", false);
+            bool publish_to_browser = prompt_curses_yes_no(12, 4, "Publish to a browser server on port 2727? [y/N]:", false);
             char browser_host_buf[HOST_BUF_SIZE] = {};
             char browser_name_buf[HOST_BUF_SIZE] = {};
             char public_host_buf[HOST_BUF_SIZE] = {};
@@ -555,7 +550,7 @@ int run_interactive_app()
                 if (client->auth_required())
                 {
                     // Prompt for password (masked)
-                    std::string pw = prompt_password(10, 4, "Server password:");
+                    std::string pw = prompt_curses_password(10, 4, "Server password:");
                     client->send("AUTH|" + pw);
 
                     // Wait for result
@@ -643,13 +638,13 @@ int run_interactive_app()
                     if (g_kicked)
                     {
                         push_message("[system] Press any key to exit...");
-                        draw_ui(input);
+                        draw_curses_chat_ui(input);
                         std::this_thread::sleep_for(std::chrono::seconds(3));
                         running = false;
                         break;
                     }
 
-                    draw_ui(input);
+                    draw_curses_chat_ui(input);
                     int c = getch();
 
                     switch (c)
@@ -661,58 +656,11 @@ int run_interactive_app()
                     {
                         if (!input.empty())
                         {
-                            auto cmd = parse_command(input);
-                            if (cmd)
-                            {
-                                if (cmd->name == "help")
-                                {
-                                    show_command_help();
-                                }
-                                else if (cmd->name == "users")
-                                {
-                                    push_message("[system] Connected users:");
-                                    for (const auto& u : connected_users())
-                                        push_message("[system]   - " + u);
-                                }
-                                else if (cmd->name == "clear")
-                                {
-                                    {
-                                        std::lock_guard lock(g_mutex);
-                                        g_messages.clear();
-                                    }
-                                    push_message("[system] Message history cleared");
-                                }
-                                else if (cmd->name == "time")
-                                {
-                                    push_message("[system] Current time: " + timestamp());
-                                }
-                                else if (cmd->name == "whisper" && cmd->args.size() >= 1)
-                                {
-                                    size_t cmd_end = input.find(' ');
-                                    if (cmd_end != std::string::npos)
-                                    {
-                                        cmd_end = input.find(' ', cmd_end + 1);
-                                        if (cmd_end != std::string::npos)
-                                        {
-                                            std::string target = cmd->args[0];
-                                            std::string message = input.substr(cmd_end + 1);
-                                            client->send("WHISPER|" + target + "|" + message);
-                                        }
-                                    }
-                                }
-                                else if (cmd->name == "exit")
-                                {
-                                    running = false;
-                                }
-                                else
-                                {
-                                    push_message("[system] Unknown command: " + cmd->name + ". Type /help.");
-                                }
-                            }
-                            else
-                            {
-                                client->send("MSG|" + input);
-                            }
+                            ChatInputContext context;
+                            context.client = client.get();
+                            context.local_nickname = g_nickname;
+                            if (handle_chat_input(input, context) == ChatInputResult::Exit)
+                                running = false;
 
                             input.clear();
                         }
@@ -739,12 +687,7 @@ int run_interactive_app()
                 if (network_thread.joinable())
                     network_thread.join();
 
-                std::lock_guard window_lock(g_window_mutex);
-                if (g_users_win) delwin(g_users_win);
-                if (g_chat_win)  delwin(g_chat_win);
-                if (g_input_win) delwin(g_input_win);
-
-                endwin();
+                shutdown_curses_ui();
                 return 0;
             }
             catch (...)
@@ -771,7 +714,7 @@ int run_interactive_app()
 
     while (running)
     {
-        draw_ui(input);
+        draw_curses_chat_ui(input);
         int ch = getch();
 
         switch (ch)
@@ -783,105 +726,12 @@ int run_interactive_app()
         {
             if (!input.empty())
             {
-                auto cmd = parse_command(input);
-                if (cmd)
-                {
-                    if (cmd->name == "help")
-                    {
-                        show_command_help();
-                        push_message("[system] /kick <nick> [reason] - Kick a user (host only)");
-                        push_message("[system] /ban  <nick> [reason] - Ban  a user (host only)");
-                        push_message("[system] /unban <nick>         - Unban a user (host only)");
-                        push_message("[system] /bans                 - List banned users");
-                    }
-                    else if (cmd->name == "users")
-                    {
-                        push_message("[system] Connected users:");
-                        for (const auto& u : connected_users())
-                            push_message("[system]   - " + u);
-                    }
-                    else if (cmd->name == "clear")
-                    {
-                        {
-                            std::lock_guard lock(g_mutex);
-                            g_messages.clear();
-                        }
-                        push_message("[system] Message history cleared");
-                    }
-                    else if (cmd->name == "time")
-                    {
-                        push_message("[system] Current time: " + timestamp());
-                    }
-                    else if (cmd->name == "whisper" && cmd->args.size() >= 1)
-                    {
-                        size_t cmd_end = input.find(' ');
-                        if (cmd_end != std::string::npos)
-                        {
-                            cmd_end = input.find(' ', cmd_end + 1);
-                            if (cmd_end != std::string::npos)
-                            {
-                                std::string target = cmd->args[0];
-                                std::string message = input.substr(cmd_end + 1);
-                                if (server)
-                                    server->send_private(g_nickname, target, message, true);
-                            }
-                        }
-                    }
-                    // ---- KICK (host only) ----
-                    else if (cmd->name == "kick" && server && cmd->args.size() >= 1)
-                    {
-                        std::string nick = cmd->args[0];
-                        std::string reason = join_args(cmd->args, 1);
-                        if (!server->kick_user(nick, reason))
-                            push_message("[system] User '" + nick + "' not found");
-                    }
-                    // ---- BAN (host only) ----
-                    else if (cmd->name == "ban" && server && cmd->args.size() >= 1)
-                    {
-                        std::string nick = cmd->args[0];
-                        std::string reason = join_args(cmd->args, 1);
-                        server->ban_user(nick, reason);
-                    }
-                    // ---- UNBAN (host only) ----
-                    else if (cmd->name == "unban" && server && cmd->args.size() >= 1)
-                    {
-                        std::string nick = cmd->args[0];
-                        if (server->unban_user(nick))
-                            push_message("[system] " + nick + " has been unbanned");
-                        else
-                            push_message("[system] '" + nick + "' is not on the ban list");
-                    }
-                    // ---- BAN LIST ----
-                    else if (cmd->name == "bans" && server)
-                    {
-                        auto bans = server->ban_list();
-                        if (bans.empty())
-                            push_message("[system] Ban list is empty");
-                        else
-                        {
-                            push_message("[system] Banned users:");
-                            for (const auto& b : bans)
-                                push_message("[system]   - " + b);
-                        }
-                    }
-                    else if (cmd->name == "exit")
-                    {
-                        running = false;
-                    }
-                    else
-                    {
-                        push_message("[system] Unknown command: " + cmd->name + ". Type /help.");
-                    }
-                }
-                else
-                {
-                    // Host broadcasts directly
-                    if (server)
-                    {
-                        server->broadcast(
-                            "[" + timestamp() + "] " + g_nickname + ": " + input);
-                    }
-                }
+                ChatInputContext context;
+                context.server = server.get();
+                context.local_nickname = g_nickname;
+                context.host_commands_enabled = true;
+                if (handle_chat_input(input, context) == ChatInputResult::Exit)
+                    running = false;
 
                 input.clear();
             }
@@ -909,15 +759,13 @@ int run_interactive_app()
     browser_publisher.reset();
     upnp.reset();
 
-    {
-        std::lock_guard window_lock(g_window_mutex);
-        if (g_users_win) delwin(g_users_win);
-        if (g_chat_win)  delwin(g_chat_win);
-        if (g_input_win) delwin(g_input_win);
-    }
-
-    endwin();
+    shutdown_curses_ui();
     io.stop();
     network_thread.join();
     return 0;
+}
+
+int run_interactive_app()
+{
+    return run_curses_app();
 }

@@ -4,8 +4,22 @@ written by "Nav2727" (what? you think i would put my real name on the internet?)
 license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 #include "common.h"
+#include "curses_app.h"
 #include "dedicated_server.h"
-#include "interactive_app.h"
+#include "gui_app.h"
+
+namespace
+{
+void show_app_usage()
+{
+    std::cout
+        << "Usage:\n"
+        << "  chatbox                  - start the curses terminal UI\n"
+        << "  chatbox --curses|--tui   - start the curses terminal UI\n"
+        << "  chatbox --gui            - start the GUI frontend when available\n\n";
+    show_dedicated_usage();
+}
+}
 
 int main(int argc, char* argv[])
 {
@@ -18,6 +32,12 @@ int main(int argc, char* argv[])
     if (argc >= 2)
     {
         std::string mode = argv[1];
+        if (mode == "--curses" || mode == "--tui")
+            return run_curses_app();
+
+        if (mode == "--gui")
+            return run_gui_app(argc, argv);
+
         if (mode == "--server" || mode == "--dedicated" || mode == "-s")
             return run_dedicated_server(argc, argv);
 
@@ -56,14 +76,14 @@ int main(int argc, char* argv[])
 
         if (mode == "--help" || mode == "-h")
         {
-            show_dedicated_usage();
+            show_app_usage();
             return 0;
         }
 
         std::cerr << "Unknown option: " << mode << "\n";
-        show_dedicated_usage();
+        show_app_usage();
         return 1;
     }
 
-    return run_interactive_app();
+    return run_curses_app();
 }

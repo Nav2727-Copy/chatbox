@@ -5,8 +5,4 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 #pragma once
 
-#include "common.h"
-
-void draw_ui(const std::string& input);
-std::string prompt_password(int row, int col, const char* label);
-bool prompt_yes_no(int row, int col, const char* label, bool default_yes = true);
+int run_gui_app(int argc, char* argv[]);

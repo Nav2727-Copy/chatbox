@@ -5,7 +5,6 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 #pragma once
 
-#include <curses.h>
 #include <boost/asio.hpp>
 #include <sodium.h>
 
