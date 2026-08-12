@@ -2,7 +2,7 @@
 
 This document describes the planned addition of multiple chat rooms, SQLite persistence, TLS transport security, and cryptographic message signatures to `chatbox`.
 
-The work should be delivered incrementally. Each milestone should leave the application buildable and usable with both the terminal and desktop frontends.
+The work should be delivered incrementally. Each milestone should leave the terminal application buildable and usable.
 
 ## Goals
 
@@ -10,7 +10,7 @@ The work should be delivered incrementally. Each milestone should leave the appl
 - Persist rooms, messages, bans, and identity bindings across restarts.
 - Encrypt client/server and server-browser traffic with TLS.
 - Authenticate user messages with the Ed25519 identity keys already used for nickname ownership.
-- Preserve terminal, GUI, interactive-host, dedicated-server, and server-browser modes.
+- Preserve terminal, interactive-host, dedicated-server, and server-browser modes.
 - Add protocol and integration tests for the new behavior.
 
 ## Non-goals for the first release
@@ -112,9 +112,8 @@ Existing `/users`, `/whisper`, `/kick`, `/ban`, and `/bans` behavior must be exp
 
 - Display the active room and topic.
 - Add room selection to the curses frontend.
-- Add a room list or selector to the FLTK frontend.
 - Clear or replace the visible transcript when switching rooms.
-- Display join, leave, and error events consistently in both frontends.
+- Display join, leave, and error events consistently.
 
 ### Completion criteria
 
@@ -266,7 +265,7 @@ Server announcements and moderation events should use a separate event type and 
 - Modified messages fail verification.
 - A signature cannot be moved to another room, server, sender, or message ID.
 - Historical signatures remain verifiable after a server restart.
-- Both frontends distinguish verified, invalid, and unsigned messages.
+- The terminal frontend distinguishes verified, invalid, and unsigned messages.
 
 ## Optional: Actual OpenPGP support
 
@@ -288,7 +287,7 @@ OpenPGP does not replace TLS: it can authenticate message authorship, but TLS is
 - Add structured security-relevant server logging without message or credential leakage.
 - Fuzz protocol and database input boundaries.
 - Test abrupt disconnects, database failures, slow clients, and certificate changes.
-- Update the README, command help, and GUI labels.
+- Update the README and command help.
 - Document the threat model and remaining limitations.
 
 ## Future enhancements
@@ -309,7 +308,7 @@ After the initial milestones are stable:
 
 The combined project is considered complete when:
 
-- All four additions work from both the curses and FLTK frontends.
+- All four additions work from the curses frontend.
 - Dedicated servers can configure database and TLS paths without source changes.
 - The server hosts multiple isolated rooms with persistent history.
 - Clients refuse invalid TLS identities under the configured trust policy.

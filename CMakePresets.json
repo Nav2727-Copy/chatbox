@@ -75,8 +75,6 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++",
-                "CHATBOX_BUILD_GUI": "OFF",
-                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
                 "VCPKG_TARGET_TRIPLET": "x64-linux"
             },
             "condition": {
@@ -101,8 +99,6 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++",
-                "CHATBOX_BUILD_GUI": "OFF",
-                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
                 "VCPKG_TARGET_TRIPLET": "x64-linux"
             },
             "condition": {
@@ -114,24 +110,6 @@
                 "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
                     "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
                 }
-            }
-        },
-        {
-            "name": "linux-gui-debug",
-            "displayName": "Linux GUI Debug",
-            "inherits": "linux-debug",
-            "cacheVariables": {
-                "CHATBOX_BUILD_GUI": "ON",
-                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "OFF"
-            }
-        },
-        {
-            "name": "linux-gui-release",
-            "displayName": "Linux GUI Release",
-            "inherits": "linux-release",
-            "cacheVariables": {
-                "CHATBOX_BUILD_GUI": "ON",
-                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "OFF"
             }
         },
         {

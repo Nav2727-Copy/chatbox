@@ -11,7 +11,6 @@ endif()
 
 project ("chatbox")
 
-option(CHATBOX_BUILD_GUI "Build the FLTK desktop frontend" ON)
 include(CTest)
 
 if (WIN32)
@@ -23,10 +22,6 @@ find_package(Boost REQUIRED COMPONENTS asio)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(Threads REQUIRED)
-
-if (CHATBOX_BUILD_GUI)
-  find_package(FLTK CONFIG REQUIRED)
-endif()
 
 if (WIN32)
   find_package(unofficial-pdcurses CONFIG REQUIRED)
@@ -98,18 +93,8 @@ target_link_libraries(chatbox_curses_frontend
 )
 target_compile_features(chatbox_curses_frontend PUBLIC cxx_std_20)
 
-if (CHATBOX_BUILD_GUI)
-  add_library(chatbox_gui_frontend STATIC
-    "gui_app.cpp"
-    "gui_app.h"
-  )
-  target_link_libraries(chatbox_gui_frontend PUBLIC chatbox_core)
-  target_link_libraries(chatbox_gui_frontend PRIVATE fltk)
-  target_compile_features(chatbox_gui_frontend PUBLIC cxx_std_20)
-endif()
-
 # =====================================================
-# chatbox  (app launcher + selectable frontend)
+# chatbox  (app launcher + terminal frontend)
 # =====================================================
 add_executable(chatbox "chatbox.cpp")
 
@@ -118,10 +103,6 @@ target_link_libraries(chatbox
     chatbox_core
     chatbox_curses_frontend
 )
-if (CHATBOX_BUILD_GUI)
-  target_link_libraries(chatbox PRIVATE chatbox_gui_frontend)
-  target_compile_definitions(chatbox PRIVATE CHATBOX_HAS_GUI=1)
-endif()
 target_compile_features(chatbox PRIVATE cxx_std_20)
 
 if (BUILD_TESTING)

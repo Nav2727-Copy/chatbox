@@ -1,24 +1,23 @@
 # chatbox
 
-`chatbox` is a C++20 chat application with selectable terminal and desktop frontends, TCP networking through Boost.Asio, and automatic UPnP port mapping through miniupnpc. It can run as an interactive chat client, an embedded host, a dedicated server, or a lightweight server browser.
+`chatbox` is a C++20 terminal chat application with TCP networking through Boost.Asio and automatic UPnP port mapping through miniupnpc. It can run as an interactive chat client, an embedded host, a dedicated server, or a lightweight server browser.
 
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![Boost.Asio](https://img.shields.io/badge/networking-Boost.Asio-blue)
 ![PDCurses](https://img.shields.io/badge/UI-PDCurses-green)
-![FLTK](https://img.shields.io/badge/GUI-FLTK-lightgrey)
 ![miniupnpc](https://img.shields.io/badge/UPnP-miniupnpc-orange)
 ![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC--BY--NC--SA--4.0-green)
 
 ## Features
 
-- Host or join a TCP chat room from the terminal or FLTK desktop GUI
+- Host or join a TCP chat room from the terminal UI
 - Run a headless dedicated server from the menu or command line
 - Run a headless server browser that published rooms can register with
 - Publish hosted or dedicated rooms to a browser server for easier discovery
-- Browse published rooms and join one from the terminal UI or GUI
+- Browse published rooms and join one from the terminal UI
 - Optional room password on hosted and dedicated rooms
 - Public-key nickname identity: first use registers a nickname key, future joins must prove the same private key
-- Live user list in the terminal split-pane interface and desktop GUI
+- Live user list in the terminal split-pane interface
 - Public messages and labeled private-message commands
 - Private messages are routed only to the sender and recipient
 - New clients receive the most recent server-side chat history on join
@@ -37,7 +36,6 @@
 | --- | --- |
 | [Boost.Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html) | TCP client/server networking |
 | [PDCurses](https://pdcurses.org/) / [ncurses](https://invisible-island.net/ncurses/) | Terminal UI on Windows / Unix |
-| [FLTK](https://www.fltk.org/) | Optional desktop GUI launched with `--gui` |
 | [miniupnpc](https://miniupnp.tuxfamily.org/) | UPnP router discovery and port mapping |
 | [libsodium](https://libsodium.gitbook.io/doc/) | Public-key signatures for nickname identity |
 
@@ -65,14 +63,6 @@ cmake --preset linux-debug
 cmake --build out/build/linux-debug -j
 ```
 
-The standard Linux presets build the terminal UI and headless server modes, so they also work on machines without X11 development files. To include the optional FLTK desktop GUI, install its host dependencies and use a GUI preset:
-
-```bash
-sudo apt-get install libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev
-cmake --preset linux-gui-debug
-cmake --build out/build/linux-gui-debug -j
-```
-
 On Windows:
 
 ```powershell
@@ -95,7 +85,7 @@ cmake -S . -B out/build/manual -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\b
 cmake --build out/build/manual
 ```
 
-The main target is `chatbox`. It links a shared core library plus the curses frontend and, when enabled, the FLTK frontend.
+The main target is `chatbox`. It links a shared core library plus the curses frontend.
 
 Run the protocol tests after building with:
 
@@ -111,11 +101,10 @@ Start the default terminal app:
 .\out\build\x64-debug\chatbox.exe
 ```
 
-You can also choose a frontend explicitly:
+You can also choose the terminal frontend explicitly:
 
 ```powershell
 .\out\build\x64-debug\chatbox.exe --curses
-.\out\build\x64-debug\chatbox.exe --gui
 ```
 
 At startup:
@@ -146,18 +135,6 @@ In chat:
 | `Enter` | Send the current message or command |
 | `Backspace` | Delete one character |
 | `Escape` | Leave the current chat session |
-
-## Desktop GUI
-
-When the FLTK frontend is included in the build, it is available with:
-
-```powershell
-.\out\build\x64-debug\chatbox.exe --gui
-```
-
-The GUI has a nickname field, connection status, Host, Join, Browse, and Disconnect buttons, a chat transcript, a users list, and a message input. Host, Join, and Browse open modal dialogs for the same settings used by the terminal UI, including room password, UPnP, browser publishing, and published-room selection.
-
-The GUI uses the same protocol and command handler as the terminal frontend. Chat commands such as `/help`, `/users`, `/whisper`, `/clear`, `/time`, and `/exit` work from the GUI message input.
 
 ## Dedicated Server
 
@@ -266,7 +243,6 @@ chatbox/
 |-- protocol.*           # Versioned messages, validation, and wire framing
 |-- interactive_app.cpp  # Curses frontend flow
 |-- curses_ui.*          # Curses drawing and prompts
-|-- gui_app.*            # FLTK desktop frontend
 |-- dedicated_server.*   # Headless server and browser-server modes
 |-- server_browser.*     # Published-room browser protocol
 |-- tests/               # CTest test sources
@@ -284,8 +260,7 @@ chatbox/
 - Interactive-host bans are session-only; dedicated-server bans persist in `bans.txt`.
 - Message history is in-memory only and resets when the server exits.
 - Server browser entries are self-reported and are not authenticated or health-checked beyond their refresh timeout.
-- The FLTK GUI is a first desktop frontend and intentionally keeps the same chat behavior as the terminal UI; deeper GUI polish is future work.
-- The checked-in CMake setup is primarily configured for Windows with PDCurses and FLTK.
+- The checked-in CMake setup uses PDCurses on Windows and ncurses on Linux and macOS.
 
 ## License
 
