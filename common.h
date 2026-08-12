@@ -5,6 +5,8 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 */
 #pragma once
 
+#include "protocol.h"
+
 #include <boost/asio.hpp>
 #include <sodium.h>
 
@@ -37,8 +39,10 @@ constexpr int MAX_MESSAGES = 200;
 constexpr int SERVER_HISTORY_LIMIT = 100;
 constexpr int RATE_LIMIT_MESSAGES = 20;
 constexpr int RATE_LIMIT_WINDOW_SECONDS = 60;
-constexpr int MAX_WIRE_LINE_LENGTH = 4096;
-constexpr int MAX_CHAT_MESSAGE_LEN = 1000;
+constexpr int MAX_WIRE_LINE_LENGTH =
+    static_cast<int>(chatbox::protocol::MAX_FRAME_LENGTH);
+constexpr int MAX_CHAT_MESSAGE_LEN =
+    static_cast<int>(chatbox::protocol::MAX_CHAT_LENGTH);
 constexpr int USERS_WINDOW_WIDTH = 24;
 constexpr int INPUT_WINDOW_HEIGHT = 3;
 constexpr int NICKNAME_BUF_SIZE = 32;

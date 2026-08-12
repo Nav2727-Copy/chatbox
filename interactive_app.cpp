@@ -551,7 +551,8 @@ int run_curses_app()
                 {
                     // Prompt for password (masked)
                     std::string pw = prompt_curses_password(10, 4, "Server password:");
-                    client->send("AUTH|" + pw);
+                    client->send(chatbox::protocol::ClientMessage{
+                        chatbox::protocol::Authenticate{ pw } });
 
                     // Wait for result
                     erase(); box(stdscr, 0, 0);
@@ -682,7 +683,8 @@ int run_curses_app()
 
                 // Shutdown client
                 if (!g_kicked)
-                    client->send("LEAVE");
+                    client->send(chatbox::protocol::ClientMessage{
+                        chatbox::protocol::Leave{} });
                 client->close();
                 if (network_thread.joinable())
                     network_thread.join();

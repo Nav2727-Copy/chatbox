@@ -1,104 +1,5 @@
 #include "utils.h"
 
-namespace
-{
-constexpr const char* BASE64_CHARS =
-"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-}
-std::string encode_base64(const std::string& input)
-{
-    std::string output;
-    int i = 0;
-
-    while (i < static_cast<int>(input.size()))
-    {
-        int bytes = 1;
-        uint32_t b = (static_cast<unsigned char>(input[i++]) & 0xFF) << 16;
-        if (i < static_cast<int>(input.size()))
-        {
-            b |= (static_cast<unsigned char>(input[i++]) & 0xFF) << 8;
-            ++bytes;
-        }
-        if (i < static_cast<int>(input.size()))
-        {
-            b |= (static_cast<unsigned char>(input[i++]) & 0xFF);
-            ++bytes;
-        }
-
-        output += BASE64_CHARS[(b >> 18) & 0x3F];
-        output += BASE64_CHARS[(b >> 12) & 0x3F];
-        output += (bytes >= 2) ? BASE64_CHARS[(b >> 6) & 0x3F] : '=';
-        output += (bytes == 3) ? BASE64_CHARS[b & 0x3F] : '=';
-    }
-
-    return output;
-}
-
-bool try_decode_base64(const std::string& input, std::string& output)
-{
-    output.clear();
-
-    if (input.empty() || input.size() % 4 != 0)
-        return false;
-
-    auto char_to_val = [](char c) -> int
-        {
-            if (c >= 'A' && c <= 'Z') return c - 'A';
-            if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-            if (c >= '0' && c <= '9') return c - '0' + 52;
-            if (c == '+') return 62;
-            if (c == '/') return 63;
-            return -1;
-        };
-
-    for (size_t i = 0; i < input.size(); i += 4)
-    {
-        const bool final_group = i + 4 == input.size();
-        int v0 = char_to_val(input[i]);
-        int v1 = char_to_val(input[i + 1]);
-        int v2 = char_to_val(input[i + 2]);
-        int v3 = char_to_val(input[i + 3]);
-
-        if (v0 < 0 || v1 < 0)
-            return false;
-
-        output += static_cast<char>((v0 << 2) | (v1 >> 4));
-
-        if (input[i + 2] != '=')
-        {
-            if (v2 < 0)
-                return false;
-
-            output += static_cast<char>((v1 << 4) | (v2 >> 2));
-            if (input[i + 3] != '=')
-            {
-                if (v3 < 0)
-                    return false;
-                output += static_cast<char>((v2 << 6) | v3);
-            }
-            else if (!final_group)
-            {
-                return false;
-            }
-        }
-        else
-        {
-            if (input[i + 3] != '=' || !final_group)
-                return false;
-        }
-    }
-
-    return true;
-}
-
-std::string decode_base64(const std::string& input)
-{
-    std::string output;
-    if (!try_decode_base64(input, output))
-        return "";
-    return output;
-}
-
 std::string bytes_to_hex(const unsigned char* data, size_t len)
 {
     std::string hex(len * 2 + 1, '\0');
@@ -253,12 +154,6 @@ std::string identity_fingerprint(const std::string& public_key_hex)
     if (public_key_hex.size() <= 16)
         return public_key_hex;
     return public_key_hex.substr(0, 16);
-}
-
-void strip_wire_newline(std::string& line)
-{
-    if (!line.empty() && line.back() == '\r')
-        line.pop_back();
 }
 
 bool is_valid_nickname(const std::string& nick)

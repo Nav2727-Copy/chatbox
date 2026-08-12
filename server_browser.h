@@ -6,6 +6,7 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 #pragma once
 
 #include "common.h"
+#include "protocol.h"
 #include "utils.h"
 struct BrowserEntry
 {
@@ -160,18 +161,21 @@ private:
                     std::istream is(&buffer_);
                     std::string line;
                     std::getline(is, line);
-                    strip_wire_newline(line);
 
-                    std::string decoded;
+                    auto decoded = chatbox::protocol::decode_frame(line);
                     std::vector<std::string> responses;
-                    if (!try_decode_base64(line, decoded))
+                    if (!decoded)
                         responses = { "ERROR|Invalid framing" };
                     else
-                        responses = browser_.process_request(decoded);
+                        responses = browser_.process_request(*decoded.value);
 
                     write_payload_.clear();
                     for (const auto& response : responses)
-                        write_payload_ += encode_base64(response) + "\n";
+                    {
+                        auto encoded = chatbox::protocol::encode_frame(response);
+                        if (encoded)
+                            write_payload_ += *encoded.value;
+                    }
 
                     boost::asio::async_write(socket_, boost::asio::buffer(write_payload_),
                         [this, self](boost::system::error_code, std::size_t)
@@ -329,8 +333,13 @@ private:
             if (!connect_with_timeout(io, socket, endpoints, browser_host, browser_port, error))
                 return false;
 
-            std::string payload = encode_base64(request) + "\n";
-            boost::asio::write(socket, boost::asio::buffer(payload), ec);
+            auto payload = chatbox::protocol::encode_frame(request);
+            if (!payload)
+            {
+                error = "Could not encode browser request: " + payload.detail;
+                return false;
+            }
+            boost::asio::write(socket, boost::asio::buffer(*payload.value), ec);
             if (ec)
             {
                 error = browser_connection_error(browser_host, browser_port,
@@ -348,11 +357,10 @@ private:
                 std::istream is(&buffer);
                 std::string line;
                 std::getline(is, line);
-                strip_wire_newline(line);
 
-                std::string decoded;
-                if (try_decode_base64(line, decoded))
-                    response.push_back(decoded);
+                auto decoded = chatbox::protocol::decode_frame(line);
+                if (decoded)
+                    response.push_back(std::move(*decoded.value));
             }
 
             if (response.empty())

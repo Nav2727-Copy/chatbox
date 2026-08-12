@@ -444,7 +444,8 @@ private:
                     return;
                 }
 
-                client_->send("AUTH|" + std::string(password));
+                client_->send(chatbox::protocol::ClientMessage{
+                    chatbox::protocol::Authenticate{ password } });
                 set_status("Authenticating...");
                 if (!wait_for([&] { return client_->auth_resolved(); }, CONNECT_WAIT_STEPS, CONNECT_WAIT_MS))
                 {
@@ -735,7 +736,8 @@ private:
         const bool had_session = connected_ || client_ || server_;
         if (client_ && !g_kicked)
         {
-            client_->send("LEAVE");
+            client_->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::Leave{} });
             client_->close();
         }
 

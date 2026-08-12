@@ -2,10 +2,8 @@
 
 void ClientSession::start()
 {
-    if (server_.has_password())
-        deliver("AUTH_REQUIRED");
-    else
-        deliver("AUTH_OK");
+    deliver(chatbox::protocol::ServerMessage{
+        chatbox::protocol::Hello{ chatbox::protocol::VERSION } });
 
     read_loop();
 }
@@ -33,35 +31,70 @@ void ClientSession::read_loop()
             std::istream is(&buffer_);
             std::string  line;
             std::getline(is, line);
-            strip_wire_newline(line);
-
-            std::string decoded;
-            if (!try_decode_base64(line, decoded))
+            auto parsed = chatbox::protocol::decode_client_frame(line);
+            if (!parsed)
             {
-                deliver("[system] Ignored invalid message frame");
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::ServerError{
+                        "Invalid client frame: " + parsed.detail } });
+                if (parsed.error == chatbox::protocol::Error::UnsupportedVersion)
+                {
+                    close();
+                    server_.leave(self);
+                    return;
+                }
                 read_loop();
                 return;
             }
 
-            auto parts = split(decoded, '|');
-
-            if (parts.empty())
+            const auto& message = *parsed.value;
+            if (const auto* hello = std::get_if<chatbox::protocol::Hello>(&message))
             {
+                if (protocol_negotiated_)
+                {
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::ServerError{ "Protocol handshake already completed" } });
+                }
+                else
+                {
+                    protocol_negotiated_ = hello->version == chatbox::protocol::VERSION;
+                    if (server_.has_password())
+                    {
+                        deliver(chatbox::protocol::ServerMessage{
+                            chatbox::protocol::AuthRequired{} });
+                    }
+                    else
+                    {
+                        deliver(chatbox::protocol::ServerMessage{
+                            chatbox::protocol::AuthAccepted{} });
+                    }
+                }
                 read_loop();
+                return;
+            }
+
+            if (!protocol_negotiated_)
+            {
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::ServerError{ "Protocol handshake required" } });
+                close();
+                server_.leave(self);
                 return;
             }
 
             // ---- AUTH ----
-            if (parts[0] == "AUTH" && parts.size() >= 2)
+            if (const auto* auth = std::get_if<chatbox::protocol::Authenticate>(&message))
             {
-                if (server_.check_password(parts[1]))
+                if (server_.check_password(auth->password))
                 {
                     authenticated_ = true;
-                    deliver("AUTH_OK");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::AuthAccepted{} });
                 }
                 else
                 {
-                    deliver("AUTH_FAIL");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::AuthRejected{} });
                     close();
                     server_.leave(self);
                     return;
@@ -73,20 +106,22 @@ void ClientSession::read_loop()
             // Reject all other messages from unauthenticated sessions
             if (server_.has_password() && !authenticated_)
             {
-                deliver("AUTH_REQUIRED");
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::AuthRequired{} });
                 read_loop();
                 return;
             }
 
             // ---- IDENTIFY ----
-            if (parts[0] == "IDENTIFY" && parts.size() >= 3)
+            if (const auto* identify = std::get_if<chatbox::protocol::Identify>(&message))
             {
-                std::string nick = parts[1];
-                std::string public_key_hex = parts[2];
+                const std::string& nick = identify->nickname;
+                const std::string& public_key_hex = identify->public_key_hex;
 
                 if (!nickname_.empty())
                 {
-                    deliver("JOIN_FAIL|Already joined");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{ "Already joined" } });
                     read_loop();
                     return;
                 }
@@ -94,7 +129,8 @@ void ClientSession::read_loop()
                 std::string identity_error;
                 if (!server_.identity_available_for(nick, public_key_hex, identity_error))
                 {
-                    deliver("JOIN_FAIL|" + identity_error);
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{ identity_error } });
                     close();
                     server_.leave(self);
                     return;
@@ -102,7 +138,7 @@ void ClientSession::read_loop()
 
                 if (server_.is_banned(nick))
                 {
-                    deliver("BANNED");
+                    deliver(chatbox::protocol::ServerMessage{ chatbox::protocol::Banned{} });
                     close();
                     server_.leave(self);
                     return;
@@ -110,7 +146,8 @@ void ClientSession::read_loop()
 
                 if (server_.nickname_taken(nick))
                 {
-                    deliver("NICK_TAKEN");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::NicknameTaken{} });
                     close();
                     server_.leave(self);
                     return;
@@ -119,14 +156,17 @@ void ClientSession::read_loop()
                 pending_nickname_ = nick;
                 pending_public_key_hex_ = public_key_hex;
                 pending_challenge_ = random_hex(IDENTITY_CHALLENGE_BYTES);
-                deliver("CHALLENGE|" + pending_challenge_);
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::Challenge{ pending_challenge_ } });
             }
             // ---- PROOF ----
-            else if (parts[0] == "PROOF" && parts.size() >= 2)
+            else if (const auto* proof =
+                std::get_if<chatbox::protocol::IdentityProof>(&message))
             {
                 if (!nickname_.empty())
                 {
-                    deliver("JOIN_FAIL|Already joined");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{ "Already joined" } });
                     read_loop();
                     return;
                 }
@@ -134,7 +174,9 @@ void ClientSession::read_loop()
                 if (pending_nickname_.empty() || pending_public_key_hex_.empty() ||
                     pending_challenge_.empty())
                 {
-                    deliver("JOIN_FAIL|Identify before sending proof");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{
+                            "Identify before sending proof" } });
                     close();
                     server_.leave(self);
                     return;
@@ -143,9 +185,10 @@ void ClientSession::read_loop()
                 if (!verify_identity_signature(
                     pending_public_key_hex_,
                     pending_challenge_,
-                    parts[1]))
+                    proof->signature_hex))
                 {
-                    deliver("JOIN_FAIL|Identity proof failed");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{ "Identity proof failed" } });
                     close();
                     server_.leave(self);
                     return;
@@ -153,7 +196,7 @@ void ClientSession::read_loop()
 
                 if (server_.is_banned(pending_nickname_))
                 {
-                    deliver("BANNED");
+                    deliver(chatbox::protocol::ServerMessage{ chatbox::protocol::Banned{} });
                     close();
                     server_.leave(self);
                     return;
@@ -161,7 +204,8 @@ void ClientSession::read_loop()
 
                 if (server_.nickname_taken(pending_nickname_))
                 {
-                    deliver("NICK_TAKEN");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::NicknameTaken{} });
                     close();
                     server_.leave(self);
                     return;
@@ -169,7 +213,9 @@ void ClientSession::read_loop()
 
                 if (!server_.bind_identity(pending_nickname_, pending_public_key_hex_))
                 {
-                    deliver("JOIN_FAIL|Identity registration failed");
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::JoinRejected{
+                            "Identity registration failed" } });
                     close();
                     server_.leave(self);
                     return;
@@ -182,19 +228,20 @@ void ClientSession::read_loop()
                 pending_challenge_.clear();
 
                 add_user(nickname_);
-                deliver("IDENTITY_OK|" + fingerprint);
-                deliver("JOIN_OK");
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::IdentityAccepted{ fingerprint } });
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::JoinAccepted{} });
                 server_.deliver_history(self);
                 server_.broadcast("[system] " + nickname_ + " joined");
                 server_.broadcast_users();
             }
             // ---- LEAVE ----
-            else if (parts[0] == "LEAVE")
+            else if (std::holds_alternative<chatbox::protocol::Leave>(message))
             {
-                if (nickname_.empty() ||
-                    (parts.size() >= 2 && parts[1] != nickname_))
+                if (nickname_.empty())
                 {
-                    deliver("[system] Ignored malformed leave request");
+                    deliver_text("[system] Ignored leave request before joining");
                     read_loop();
                     return;
                 }
@@ -206,70 +253,66 @@ void ClientSession::read_loop()
                 server_.broadcast_users();
             }
             // ---- MSG ----
-            else if (parts[0] == "MSG" && parts.size() >= 2)
+            else if (const auto* chat = std::get_if<chatbox::protocol::Chat>(&message))
             {
                 if (nickname_.empty())
                 {
-                    deliver("[system] Join before sending messages");
+                    deliver_text("[system] Join before sending messages");
                     read_loop();
                     return;
                 }
 
                 if (!consume_message_quota())
                 {
-                    deliver("[system] Slow down - message rate limit is "
+                    deliver_text("[system] Slow down - message rate limit is "
                         + std::to_string(RATE_LIMIT_MESSAGES)
                         + " per minute");
                     read_loop();
                     return;
                 }
 
-                const size_t message_start =
-                    parts.size() >= 3 && parts[1] == nickname_ ? 2 : 1;
-                std::string message = join_fields(parts, message_start, '|');
-                if (!is_valid_chat_message(message))
+                if (!is_valid_chat_message(chat->body))
                 {
-                    deliver("[system] Invalid message text");
+                    deliver_text("[system] Invalid message text");
                     read_loop();
                     return;
                 }
 
-                server_.broadcast("[" + timestamp() + "] " + nickname_ + ": " + message);
+                server_.broadcast("[" + timestamp() + "] " + nickname_ + ": " + chat->body);
             }
             // ---- WHISPER ----
-            else if (parts[0] == "WHISPER" && parts.size() >= 3)
+            else if (const auto* whisper =
+                std::get_if<chatbox::protocol::Whisper>(&message))
             {
                 if (nickname_.empty())
                 {
-                    deliver("[system] Join before sending messages");
+                    deliver_text("[system] Join before sending messages");
                     read_loop();
                     return;
                 }
 
                 if (!consume_message_quota())
                 {
-                    deliver("[system] Slow down - message rate limit is "
+                    deliver_text("[system] Slow down - message rate limit is "
                         + std::to_string(RATE_LIMIT_MESSAGES)
                         + " per minute");
                     read_loop();
                     return;
                 }
 
-                const bool old_format = parts.size() >= 4 && parts[1] == nickname_;
-                const std::string& target = old_format ? parts[2] : parts[1];
-                std::string message = join_fields(parts, old_format ? 3 : 2, '|');
-                if (!is_valid_nickname(target) || !is_valid_chat_message(message))
+                if (!is_valid_nickname(whisper->target) ||
+                    !is_valid_chat_message(whisper->body))
                 {
-                    deliver("[system] Invalid whisper target or message");
+                    deliver_text("[system] Invalid whisper target or message");
                     read_loop();
                     return;
                 }
 
-                server_.send_private(nickname_, target, message);
+                server_.send_private(nickname_, whisper->target, whisper->body);
             }
             else
             {
-                deliver("[system] Ignored malformed message");
+                deliver_text("[system] Ignored message in the current session state");
             }
 
             read_loop();
@@ -291,18 +334,30 @@ bool ClientSession::consume_message_quota()
     return true;
 }
 
-void ClientSession::deliver(const std::string& msg)
+void ClientSession::deliver(const chatbox::protocol::ServerMessage& msg)
 {
+    auto encoded = chatbox::protocol::encode_server_frame(msg);
+    if (!encoded)
+    {
+        std::cerr << "Protocol encode error: " << encoded.detail << "\n";
+        return;
+    }
+
     auto self = shared_from_this();
     boost::asio::post(
         socket_.get_executor(),
-        [this, self, msg]
+        [this, self, wire = std::move(*encoded.value)]
         {
             const bool writing = !write_queue_.empty();
-            write_queue_.push_back(encode_base64(msg) + "\n");
+            write_queue_.push_back(wire);
             if (!writing)
                 write_next();
         });
+}
+
+void ClientSession::deliver_text(const std::string& text)
+{
+    deliver(chatbox::protocol::ServerMessage{ chatbox::protocol::Text{ text } });
 }
 
 void ClientSession::write_next()

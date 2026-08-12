@@ -7,6 +7,7 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 #include "common.h"
 #include "app_state.h"
+#include "protocol.h"
 #include "utils.h"
 class ChatClient
 {
@@ -15,8 +16,7 @@ public:
         : socket_(io), buffer_(MAX_WIRE_LINE_LENGTH)
     {}
 
-    // connect() returns false on failure.
-    // on_auth_result is called with true/false when AUTH_OK / AUTH_FAIL arrives.
+    // connect() returns false on a synchronous resolve or connection failure.
     bool connect(const std::string& host, uint16_t port)
     {
         try
@@ -24,6 +24,8 @@ public:
             tcp::resolver resolver(socket_.get_executor());
             auto endpoints = resolver.resolve(host, std::to_string(port));
             boost::asio::connect(socket_, endpoints);
+            send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::Hello{ chatbox::protocol::VERSION } });
             read_loop();
             return true;
         }
@@ -33,14 +35,21 @@ public:
         }
     }
 
-    void send(const std::string& msg)
+    void send(const chatbox::protocol::ClientMessage& msg)
     {
+        auto encoded = chatbox::protocol::encode_client_frame(msg);
+        if (!encoded)
+        {
+            push_message("[system] Could not encode message: " + encoded.detail);
+            return;
+        }
+
         boost::asio::post(
             socket_.get_executor(),
-            [this, msg]
+            [this, wire = std::move(*encoded.value)]
             {
                 const bool writing = !write_queue_.empty();
-                write_queue_.push_back(encode_base64(msg) + "\n");
+                write_queue_.push_back(wire);
                 if (!writing)
                     write_next();
             });
@@ -61,7 +70,8 @@ public:
             return;
         }
 
-        send("IDENTIFY|" + nick + "|" + identity_->public_key_hex);
+        send(chatbox::protocol::ClientMessage{
+            chatbox::protocol::Identify{ nick, identity_->public_key_hex } });
     }
 
     void close()
@@ -133,6 +143,14 @@ private:
             {
                 if (ec)
                 {
+                    if (!closing_ && !auth_resolved_)
+                    {
+                        auth_resolved_ = true;
+                        auth_ok_ = false;
+                        join_resolved_ = true;
+                        join_failed_ = true;
+                        join_failure_reason_ = "Connection closed during protocol handshake";
+                    }
                     if (!closing_ && !kicked_ && !banned_ && auth_ok_)
                         push_message("[system] disconnected");
                     return;
@@ -141,42 +159,69 @@ private:
                 std::istream is(&buffer_);
                 std::string  line;
                 std::getline(is, line);
-                strip_wire_newline(line);
-
-                std::string decoded;
-                if (!try_decode_base64(line, decoded))
+                auto parsed = chatbox::protocol::decode_server_frame(line);
+                if (!parsed)
                 {
-                    push_message("[system] Ignored invalid server message");
+                    push_message("[system] Ignored invalid server frame: " + parsed.detail);
+                    if (parsed.error == chatbox::protocol::Error::UnsupportedVersion)
+                    {
+                        auth_resolved_ = true;
+                        auth_ok_ = false;
+                        join_resolved_ = true;
+                        join_failed_ = true;
+                        join_failure_reason_ = parsed.detail;
+                        close();
+                        return;
+                    }
                     read_loop();
                     return;
                 }
 
+                const auto& message = *parsed.value;
+                if (const auto* hello = std::get_if<chatbox::protocol::Hello>(&message))
+                {
+                    protocol_negotiated_ =
+                        hello->version == chatbox::protocol::VERSION;
+                }
+                else if (!protocol_negotiated_)
+                {
+                    auth_resolved_ = true;
+                    auth_ok_ = false;
+                    join_resolved_ = true;
+                    join_failed_ = true;
+                    join_failure_reason_ = "Server did not complete the protocol handshake";
+                    push_message("[system] " + join_failure_reason_);
+                    close();
+                    return;
+                }
                 // Server signals
-                if (decoded == "AUTH_REQUIRED")
+                else if (std::holds_alternative<chatbox::protocol::AuthRequired>(message))
                 {
                     auth_required_ = true;
                 }
-                else if (decoded == "AUTH_OK")
+                else if (std::holds_alternative<chatbox::protocol::AuthAccepted>(message))
                 {
                     auth_resolved_ = true;
                     auth_ok_ = true;
                 }
-                else if (decoded == "AUTH_FAIL")
+                else if (std::holds_alternative<chatbox::protocol::AuthRejected>(message))
                 {
                     auth_resolved_ = true;
                     auth_ok_ = false;
                     push_message("[system] Wrong password - disconnected");
                 }
-                else if (decoded == "JOIN_OK")
+                else if (std::holds_alternative<chatbox::protocol::JoinAccepted>(message))
                 {
                     join_resolved_ = true;
                 }
-                else if (decoded.rfind("CHALLENGE|", 0) == 0)
+                else if (const auto* challenge =
+                    std::get_if<chatbox::protocol::Challenge>(&message))
                 {
-                    auto parts = split(decoded, '|');
-                    if (parts.size() >= 2 && identity_)
+                    if (identity_)
                     {
-                        send("PROOF|" + sign_identity_challenge(*identity_, parts[1]));
+                        send(chatbox::protocol::ClientMessage{
+                            chatbox::protocol::IdentityProof{
+                                sign_identity_challenge(*identity_, challenge->challenge_hex) } });
                     }
                     else
                     {
@@ -185,54 +230,53 @@ private:
                         join_failure_reason_ = "Identity challenge could not be answered";
                     }
                 }
-                else if (decoded.rfind("IDENTITY_OK|", 0) == 0)
+                else if (const auto* accepted =
+                    std::get_if<chatbox::protocol::IdentityAccepted>(&message))
                 {
-                    auto parts = split(decoded, '|');
-                    if (parts.size() >= 2)
-                        push_message("[system] Identity verified: " + parts[1]);
+                    push_message("[system] Identity verified: " + accepted->fingerprint);
                 }
-                else if (decoded == "BANNED")
+                else if (std::holds_alternative<chatbox::protocol::Banned>(message))
                 {
                     join_resolved_ = true;
                     banned_ = true;
                     push_message("[system] You are banned from this server");
                 }
-                else if (decoded == "NICK_TAKEN")
+                else if (std::holds_alternative<chatbox::protocol::NicknameTaken>(message))
                 {
                     join_resolved_ = true;
                     nickname_taken_ = true;
                     push_message("[system] Nickname is already in use");
                 }
-                else if (decoded.rfind("JOIN_FAIL|", 0) == 0)
+                else if (const auto* rejected =
+                    std::get_if<chatbox::protocol::JoinRejected>(&message))
                 {
                     join_resolved_ = true;
                     join_failed_ = true;
-                    join_failure_reason_ = decoded.substr(10);
+                    join_failure_reason_ = rejected->reason;
                     push_message("[system] Join failed: " + join_failure_reason_);
                 }
-                else if (decoded.rfind("KICK|", 0) == 0)
+                else if (const auto* kick = std::get_if<chatbox::protocol::Kick>(&message))
                 {
                     kicked_ = true;
-                    auto parts = split(decoded, '|');
-                    if (parts.size() >= 3)
-                        kick_reason_ = join_fields(parts, 2, '|');
+                    kick_reason_ = kick->reason;
                     push_message("[system] You have been kicked"
                         + (kick_reason_.empty() ? "" : ": " + kick_reason_));
                     g_kicked = true;   // signal main loop
                 }
-                else if (decoded.rfind("USERS|", 0) == 0)
+                else if (const auto* users =
+                    std::get_if<chatbox::protocol::UserList>(&message))
                 {
-                    std::string list = decoded.substr(6);
                     std::lock_guard lock(g_mutex);
-                    g_users.clear();
-                    if (!list.empty())
-                        for (auto& name : split(list, ','))
-                            if (is_valid_nickname(name))
-                                g_users.push_back(name);
+                    g_users = users->nicknames;
                 }
-                else
+                else if (const auto* text = std::get_if<chatbox::protocol::Text>(&message))
                 {
-                    push_message(decoded);
+                    push_message(text->body);
+                }
+                else if (const auto* error =
+                    std::get_if<chatbox::protocol::ServerError>(&message))
+                {
+                    push_message("[system] Server protocol error: " + error->reason);
                 }
 
                 read_loop();
@@ -252,6 +296,7 @@ private:
     std::atomic<bool> nickname_taken_{ false };
     std::atomic<bool> join_failed_{ false };
     std::atomic<bool> closing_{ false };
+    std::atomic<bool> protocol_negotiated_{ false };
     std::optional<ClientIdentity> identity_;
     std::string       kick_reason_;
     std::string       join_failure_reason_;

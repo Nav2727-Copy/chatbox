@@ -29,22 +29,51 @@
 - Dedicated-server ban persistence in `bans.txt`
 - Optional UPnP port mapping with fallback LAN address display
 - Base64 message framing for simple line-safe transport
+- Versioned protocol handshake with typed and validated chat messages
 
 ## Dependencies
 
 | Library | Purpose |
 | --- | --- |
 | [Boost.Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html) | TCP client/server networking |
-| [PDCurses](https://pdcurses.org/) | Terminal UI on Windows |
+| [PDCurses](https://pdcurses.org/) / [ncurses](https://invisible-island.net/ncurses/) | Terminal UI on Windows / Unix |
 | [FLTK](https://www.fltk.org/) | Optional desktop GUI launched with `--gui` |
 | [miniupnpc](https://miniupnp.tuxfamily.org/) | UPnP router discovery and port mapping |
 | [libsodium](https://libsodium.gitbook.io/doc/) | Public-key signatures for nickname identity |
 
-The current CMake project is set up for vcpkg, PDCurses, and FLTK. The checked-in build configuration is Windows-focused, with Linux and macOS presets present for future portability work.
+The CMake project uses PDCurses on Windows and ncurses on Linux and macOS. Dependencies are restored through the checked-in vcpkg manifest.
 
 ## Building
 
-Install vcpkg first if it is not already available:
+Install vcpkg first if it is not already available.
+
+On Debian or Ubuntu, install the compiler and development tools used by vcpkg first:
+
+```bash
+sudo apt-get install build-essential cmake curl git pkg-config zip unzip \
+  autoconf autoconf-archive automake libtool
+```
+
+Then install vcpkg and build:
+
+```bash
+git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+"$HOME/vcpkg/bootstrap-vcpkg.sh"
+export VCPKG_ROOT="$HOME/vcpkg"
+
+cmake --preset linux-debug
+cmake --build out/build/linux-debug -j
+```
+
+The standard Linux presets build the terminal UI and headless server modes, so they also work on machines without X11 development files. To include the optional FLTK desktop GUI, install its host dependencies and use a GUI preset:
+
+```bash
+sudo apt-get install libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev
+cmake --preset linux-gui-debug
+cmake --build out/build/linux-gui-debug -j
+```
+
+On Windows:
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg "$env:USERPROFILE\vcpkg"
@@ -59,14 +88,20 @@ cmake --preset x64-debug
 cmake --build out/build/x64-debug
 ```
 
-The first CMake configure uses `vcpkg.json` to restore the required packages. The checked-in CMake file has a Windows default vcpkg path; if your checkout is somewhere else, pass the toolchain file explicitly:
+The first CMake configure uses `vcpkg.json` to restore the required packages. For a manual build, pass the toolchain file explicitly:
 
 ```powershell
 cmake -S . -B out/build/manual -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
 cmake --build out/build/manual
 ```
 
-The main target is `chatbox`. It links a shared core library plus separate curses and FLTK frontend libraries.
+The main target is `chatbox`. It links a shared core library plus the curses frontend and, when enabled, the FLTK frontend.
+
+Run the protocol tests after building with:
+
+```bash
+ctest --test-dir out/build/linux-debug --output-on-failure
+```
 
 ## Running
 
@@ -114,7 +149,7 @@ In chat:
 
 ## Desktop GUI
 
-The FLTK frontend is available with:
+When the FLTK frontend is included in the build, it is available with:
 
 ```powershell
 .\out\build\x64-debug\chatbox.exe --gui
@@ -228,11 +263,13 @@ chatbox/
 |-- chat_client.h        # TCP chat client
 |-- chat_server.h        # TCP chat server and sessions
 |-- commands.*           # Shared chat command parser/handler
+|-- protocol.*           # Versioned messages, validation, and wire framing
 |-- interactive_app.cpp  # Curses frontend flow
 |-- curses_ui.*          # Curses drawing and prompts
 |-- gui_app.*            # FLTK desktop frontend
 |-- dedicated_server.*   # Headless server and browser-server modes
 |-- server_browser.*     # Published-room browser protocol
+|-- tests/               # CTest test sources
 |-- CMakeLists.txt       # Build configuration
 |-- CMakePresets.json    # Windows/Linux/macOS configure presets
 |-- vcpkg.json           # Dependency manifest

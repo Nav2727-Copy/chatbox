@@ -14,9 +14,6 @@ struct ClientIdentity
     std::string public_key_hex;
 };
 
-std::string encode_base64(const std::string& input);
-bool try_decode_base64(const std::string& input, std::string& output);
-std::string decode_base64(const std::string& input);
 std::string bytes_to_hex(const unsigned char* data, size_t len);
 bool hex_to_bytes(const std::string& hex, unsigned char* out, size_t out_len);
 bool is_hex_of_len(const std::string& text, size_t bytes);
@@ -32,7 +29,6 @@ bool verify_identity_signature(
     const std::string& challenge,
     const std::string& signature_hex);
 std::string identity_fingerprint(const std::string& public_key_hex);
-void strip_wire_newline(std::string& line);
 bool is_valid_nickname(const std::string& nick);
 bool is_valid_chat_message(const std::string& message);
 std::string timestamp();

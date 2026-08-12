@@ -6,7 +6,9 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 #include "common.h"
 #include "curses_app.h"
 #include "dedicated_server.h"
+#ifdef CHATBOX_HAS_GUI
 #include "gui_app.h"
+#endif
 
 namespace
 {
@@ -16,7 +18,7 @@ void show_app_usage()
         << "Usage:\n"
         << "  chatbox                  - start the curses terminal UI\n"
         << "  chatbox --curses|--tui   - start the curses terminal UI\n"
-        << "  chatbox --gui            - start the GUI frontend when available\n\n";
+        << "  chatbox --gui            - start the GUI frontend when built\n\n";
     show_dedicated_usage();
 }
 }
@@ -36,7 +38,14 @@ int main(int argc, char* argv[])
             return run_curses_app();
 
         if (mode == "--gui")
+        {
+#ifdef CHATBOX_HAS_GUI
             return run_gui_app(argc, argv);
+#else
+            std::cerr << "The GUI frontend was not built. Reconfigure with CHATBOX_BUILD_GUI=ON.\n";
+            return 1;
+#endif
+        }
 
         if (mode == "--server" || mode == "--dedicated" || mode == "-s")
             return run_dedicated_server(argc, argv);
@@ -85,5 +94,9 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+#ifdef CHATBOX_HAS_GUI
     return run_gui_app(argc, argv);
+#else
+    return run_curses_app();
+#endif
 }

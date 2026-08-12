@@ -83,7 +83,8 @@ ChatInputResult handle_chat_input(const std::string& input, const ChatInputConte
         }
         else if (context.client)
         {
-            context.client->send("MSG|" + input);
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::Chat{ input } });
         }
         return ChatInputResult::Continue;
     }
@@ -126,7 +127,8 @@ ChatInputResult handle_chat_input(const std::string& input, const ChatInputConte
         }
         else if (context.client)
         {
-            context.client->send("WHISPER|" + target + "|" + message);
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::Whisper{ target, message } });
         }
     }
     else if (cmd->name == "kick" && context.server && context.host_commands_enabled && cmd->args.size() >= 1)

@@ -8,6 +8,7 @@
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "installDir": "${sourceDir}/out/install/${presetName}",
             "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "cl.exe",
                 "CMAKE_CXX_COMPILER": "cl.exe"
             },
@@ -27,7 +28,8 @@
             },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "$env{VSINSTALLDIR}Common7/IDE/CommonExtensions/Microsoft/CMake/cmake/Microsoft/SegmentHeap.cmake"
+                "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "$env{VSINSTALLDIR}Common7/IDE/CommonExtensions/Microsoft/CMake/cmake/Microsoft/SegmentHeap.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-windows-static"
             }
         },
         {
@@ -49,7 +51,8 @@
             },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "$env{VSINSTALLDIR}Common7/IDE/CommonExtensions/Microsoft/CMake/cmake/Microsoft/SegmentHeap.cmake"
+                "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "$env{VSINSTALLDIR}Common7/IDE/CommonExtensions/Microsoft/CMake/cmake/Microsoft/SegmentHeap.cmake",
+                "VCPKG_TARGET_TRIPLET": "x86-windows-static"
             }
         },
         {
@@ -69,8 +72,12 @@
             "installDir": "${sourceDir}/out/install/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
-                "CMAKE_CXX_COMPILER": "g++"
+                "CMAKE_CXX_COMPILER": "g++",
+                "CHATBOX_BUILD_GUI": "OFF",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
+                "VCPKG_TARGET_TRIPLET": "x64-linux"
             },
             "condition": {
                 "type": "equals",
@@ -91,8 +98,12 @@
             "installDir": "${sourceDir}/out/install/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
-                "CMAKE_CXX_COMPILER": "g++"
+                "CMAKE_CXX_COMPILER": "g++",
+                "CHATBOX_BUILD_GUI": "OFF",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
+                "VCPKG_TARGET_TRIPLET": "x64-linux"
             },
             "condition": {
                 "type": "equals",
@@ -106,6 +117,24 @@
             }
         },
         {
+            "name": "linux-gui-debug",
+            "displayName": "Linux GUI Debug",
+            "inherits": "linux-debug",
+            "cacheVariables": {
+                "CHATBOX_BUILD_GUI": "ON",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "OFF"
+            }
+        },
+        {
+            "name": "linux-gui-release",
+            "displayName": "Linux GUI Release",
+            "inherits": "linux-release",
+            "cacheVariables": {
+                "CHATBOX_BUILD_GUI": "ON",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "OFF"
+            }
+        },
+        {
             "name": "macos-debug",
             "displayName": "macOS Debug",
             "generator": "Unix Makefiles",
@@ -113,6 +142,7 @@
             "installDir": "${sourceDir}/out/install/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++"
             },

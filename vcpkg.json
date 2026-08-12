@@ -1,11 +1,31 @@
 {
   "name": "chatbox",
   "version": "0.0.1",
+  "default-features": [
+    "gui"
+  ],
   "dependencies": [
     "boost-asio",
-    "fltk",
-    "pdcurses",
+    {
+      "name": "pdcurses",
+      "platform": "windows"
+    },
+    {
+      "name": "ncurses",
+      "platform": "!windows"
+    },
     "miniupnpc",
     "libsodium"
-  ]
+  ],
+  "features": {
+    "gui": {
+      "description": "Build the FLTK desktop frontend",
+      "dependencies": [
+        {
+          "name": "fltk",
+          "default-features": false
+        }
+      ]
+    }
+  }
 }

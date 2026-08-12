@@ -8,6 +8,7 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 #include "common.h"
 #include "app_state.h"
 #include "chat_log.h"
+#include "protocol.h"
 #include "utils.h"
 class ChatServer;
 
@@ -21,7 +22,8 @@ public:
     {}
 
     void start();
-    void deliver(const std::string& msg);
+    void deliver(const chatbox::protocol::ServerMessage& msg);
+    void deliver_text(const std::string& text);
     void close();
 
     // The nickname is set once identity proof is accepted
@@ -42,6 +44,7 @@ private:
     std::string   pending_public_key_hex_;
     std::string   pending_challenge_;
     bool          authenticated_ = false;   // true after password accepted
+    bool          protocol_negotiated_ = false;
     bool          close_after_write_ = false;
     bool          suppress_leave_notice_ = false;
 };
@@ -193,7 +196,7 @@ public:
         }
 
         for (auto& s : sessions)
-            s->deliver(msg);
+            s->deliver_text(msg);
     }
 
     void broadcast_server(const std::string& msg)
@@ -226,7 +229,7 @@ public:
         {
             std::string error = "[system] User '" + target + "' not found";
             if (sender_session)
-                sender_session->deliver(error);
+                sender_session->deliver_text(error);
             if (mirror_to_local)
                 push_message(error);
             return false;
@@ -239,10 +242,10 @@ public:
             push_message(line);
 
         if (target_session)
-            target_session->deliver(line);
+            target_session->deliver_text(line);
 
         if (sender_session && sender != target)
-            sender_session->deliver(line);
+            sender_session->deliver_text(line);
 
         if (log_)
             log_->write("[private] " + sender + " -> " + target + ": " + message);
@@ -261,23 +264,18 @@ public:
         if (history.empty())
             return;
 
-        session->deliver("[system] Recent messages:");
+        session->deliver_text("[system] Recent messages:");
         for (const auto& msg : history)
-            session->deliver(msg);
+            session->deliver_text(msg);
     }
 
     void broadcast_users()
     {
-        std::string payload = "USERS|";
+        chatbox::protocol::UserList users;
         {
             std::lock_guard lock(g_mutex);
-            bool first = true;
             for (const auto& u : g_users)
-            {
-                if (!first) payload += ',';
-                payload += u;
-                first = false;
-            }
+                users.nicknames.push_back(u);
         }
 
         std::vector<std::shared_ptr<ClientSession>> sessions;
@@ -287,7 +285,7 @@ public:
         }
 
         for (auto& s : sessions)
-            s->deliver(payload);
+            s->deliver(chatbox::protocol::ServerMessage{ users });
     }
 
     void stop()
@@ -330,11 +328,8 @@ public:
         if (!target)
             return false;
 
-        std::string kick_msg = "KICK|" + nick;
-        if (!reason.empty())
-            kick_msg += "|" + reason;
-
-        target->deliver(kick_msg);
+        target->deliver(chatbox::protocol::ServerMessage{
+            chatbox::protocol::Kick{ nick, reason } });
         target->close();
         leave(target);
         remove_user(nick);
