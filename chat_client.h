@@ -8,29 +8,59 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 #include "common.h"
 #include "app_state.h"
 #include "protocol.h"
+#include "tls.h"
+#include "transport.h"
 #include "utils.h"
 class ChatClient
 {
 public:
-    ChatClient(boost::asio::io_context& io)
-        : socket_(io), buffer_(MAX_WIRE_LINE_LENGTH)
-    {}
+    explicit ChatClient(boost::asio::io_context& io,
+        chatbox::tls::ClientConfig tls_config = {})
+        : tls_config_(std::move(tls_config)),
+        tls_context_(boost::asio::ssl::context::tls_client),
+        stream_(io, tls_config_.enabled ? &tls_context_ : nullptr),
+        buffer_(MAX_WIRE_LINE_LENGTH)
+    {
+        chatbox::tls::configure_client_context(tls_context_, tls_config_);
+    }
 
     // connect() returns false on a synchronous resolve or connection failure.
     bool connect(const std::string& host, uint16_t port)
     {
         try
         {
-            tcp::resolver resolver(socket_.get_executor());
+            tcp::resolver resolver(stream_.get_executor());
             auto endpoints = resolver.resolve(host, std::to_string(port));
-            boost::asio::connect(socket_, endpoints);
+            boost::asio::connect(stream_.lowest_layer(), endpoints);
+            if (tls_config_.enabled)
+            {
+                chatbox::tls::set_server_name(stream_.native_tls_handle(), host);
+                boost::system::error_code handshake_error;
+                stream_.client_handshake(handshake_error);
+                if (handshake_error)
+                {
+                    connect_error_ = "TLS handshake failed: " + handshake_error.message();
+                    stream_.close();
+                    return false;
+                }
+                std::string notice;
+                if (!chatbox::tls::verify_peer(stream_.native_tls_handle(), host, port,
+                    tls_config_, notice, connect_error_))
+                {
+                    stream_.close();
+                    return false;
+                }
+                if (!notice.empty())
+                    push_message("[security] " + notice);
+            }
             send(chatbox::protocol::ClientMessage{
                 chatbox::protocol::Hello{ chatbox::protocol::VERSION } });
             read_loop();
             return true;
         }
-        catch (...)
+        catch (const std::exception& ex)
         {
+            connect_error_ = ex.what();
             return false;
         }
     }
@@ -45,7 +75,7 @@ public:
         }
 
         boost::asio::post(
-            socket_.get_executor(),
+            stream_.get_executor(),
             [this, wire = std::move(*encoded.value)]
             {
                 const bool writing = !write_queue_.empty();
@@ -74,11 +104,17 @@ public:
             chatbox::protocol::Identify{ nick, identity_->public_key_hex } });
     }
 
+    void request_rooms()
+    {
+        room_list_requested_ = true;
+        send(chatbox::protocol::ClientMessage{ chatbox::protocol::ListRooms{} });
+    }
+
     void close()
     {
         closing_ = true;
         boost::asio::post(
-            socket_.get_executor(),
+            stream_.get_executor(),
             [this]
             {
                 if (!write_queue_.empty())
@@ -87,9 +123,7 @@ public:
                     return;
                 }
 
-                boost::system::error_code ignored;
-                socket_.shutdown(tcp::socket::shutdown_both, ignored);
-                socket_.close(ignored);
+                stream_.close();
             });
     }
 
@@ -104,12 +138,13 @@ public:
     bool join_failed()         const { return join_failed_; }
     const std::string& join_failure_reason() const { return join_failure_reason_; }
     const std::string& kick_reason() const { return kick_reason_; }
+    const std::string& connect_error() const { return connect_error_; }
 
 private:
     void write_next()
     {
-        boost::asio::async_write(
-            socket_, boost::asio::buffer(write_queue_.front()),
+        stream_.async_write(
+            boost::asio::buffer(write_queue_.front()),
             [this](boost::system::error_code ec, std::size_t)
             {
                 if (ec)
@@ -128,17 +163,15 @@ private:
 
                 if (close_after_write_)
                 {
-                    boost::system::error_code ignored;
-                    socket_.shutdown(tcp::socket::shutdown_both, ignored);
-                    socket_.close(ignored);
+                    stream_.close();
                 }
             });
     }
 
     void read_loop()
     {
-        boost::asio::async_read_until(
-            socket_, buffer_, '\n',
+        stream_.async_read_until(
+            buffer_, '\n',
             [this](boost::system::error_code ec, std::size_t)
             {
                 if (ec)
@@ -266,8 +299,46 @@ private:
                 else if (const auto* users =
                     std::get_if<chatbox::protocol::UserList>(&message))
                 {
-                    std::lock_guard lock(g_mutex);
-                    g_users = users->nicknames;
+                    if (users->room_id == active_room_id())
+                    {
+                        std::lock_guard lock(g_mutex);
+                        g_users = users->nicknames;
+                    }
+                }
+                else if (const auto* rooms =
+                    std::get_if<chatbox::protocol::RoomList>(&message))
+                {
+                    update_room_list(rooms->rooms);
+                    if (room_list_requested_.exchange(false))
+                    {
+                        const auto current = active_room_id();
+                        push_message("[system] Available rooms:");
+                        for (const auto& room : rooms->rooms)
+                            push_message("[system]   "
+                                + std::string(room.id == current ? "* " : "- ")
+                                + room.name + " (" + std::to_string(room.user_count) + ")");
+                    }
+                }
+                else if (const auto* room =
+                    std::get_if<chatbox::protocol::RoomJoined>(&message))
+                {
+                    activate_room(room->id, room->name, room->topic);
+                    push_message("[system] Entered #" + room->name
+                        + (room->topic.empty() ? "" : " - " + room->topic));
+                }
+                else if (const auto* topic =
+                    std::get_if<chatbox::protocol::RoomTopic>(&message))
+                {
+                    update_room_topic(topic->room_id, topic->topic);
+                    if (topic->room_id == active_room_id())
+                        push_message("[system] Topic: "
+                            + (topic->topic.empty() ? "(none)" : topic->topic));
+                }
+                else if (const auto* room_text =
+                    std::get_if<chatbox::protocol::RoomText>(&message))
+                {
+                    if (room_text->room_id == active_room_id())
+                        push_message(room_text->body);
                 }
                 else if (const auto* text = std::get_if<chatbox::protocol::Text>(&message))
                 {
@@ -276,14 +347,16 @@ private:
                 else if (const auto* error =
                     std::get_if<chatbox::protocol::ServerError>(&message))
                 {
-                    push_message("[system] Server protocol error: " + error->reason);
+                    push_message("[system] " + error->reason);
                 }
 
                 read_loop();
             });
     }
 
-    tcp::socket            socket_;
+    chatbox::tls::ClientConfig tls_config_;
+    boost::asio::ssl::context tls_context_;
+    TransportStream stream_;
     boost::asio::streambuf buffer_;
     std::deque<std::string> write_queue_;
 
@@ -297,8 +370,10 @@ private:
     std::atomic<bool> join_failed_{ false };
     std::atomic<bool> closing_{ false };
     std::atomic<bool> protocol_negotiated_{ false };
+    std::atomic<bool> room_list_requested_{ false };
     std::optional<ClientIdentity> identity_;
     std::string       kick_reason_;
     std::string       join_failure_reason_;
+    std::string       connect_error_;
     bool              close_after_write_ = false;
 };

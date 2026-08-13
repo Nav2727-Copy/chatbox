@@ -38,12 +38,32 @@ int main(int argc, char* argv[])
 
         if (mode == "--browser")
         {
-            if (argc >= 3)
+            chatbox::tls::ServerConfig tls_config{ true, "", "" };
+            for (int i = 2; i < argc; ++i)
             {
-                std::cerr << "--browser uses fixed port " << BROWSER_PORT << " and takes no port argument\n";
+                const std::string arg = argv[i];
+                if (arg == "--allow-plaintext")
+                    tls_config.enabled = false;
+                else if (arg == "--require-tls")
+                    tls_config.enabled = true;
+                else if (arg == "--tls-cert" && i + 1 < argc)
+                    tls_config.certificate_path = argv[++i];
+                else if (arg == "--tls-key" && i + 1 < argc)
+                    tls_config.private_key_path = argv[++i];
+                else
+                {
+                    std::cerr << "Unknown or incomplete browser option: " << arg << "\n";
+                    return 1;
+                }
+            }
+            if (tls_config.enabled && (tls_config.certificate_path.empty()
+                || tls_config.private_key_path.empty()))
+            {
+                std::cerr << "Browser TLS requires --tls-cert and --tls-key. "
+                    "Use --allow-plaintext only for an explicitly insecure browser.\n";
                 return 1;
             }
-            return run_browser_server(BROWSER_PORT);
+            return run_browser_server(BROWSER_PORT, std::move(tls_config));
         }
 
         if (mode == "--browse")
@@ -61,12 +81,25 @@ int main(int argc, char* argv[])
                     << BROWSER_PORT << " is fixed.\n";
                 return 1;
             }
-            if (argc >= 4)
+            chatbox::tls::ClientConfig tls_config;
+            for (int i = 3; i < argc; ++i)
             {
-                std::cerr << "--browse uses fixed browser port " << BROWSER_PORT << "\n";
-                return 1;
+                const std::string arg = argv[i];
+                if (arg == "--plaintext")
+                    tls_config.enabled = false;
+                else if (arg == "--tls-ca" && i + 1 < argc)
+                    tls_config.ca_path = argv[++i];
+                else if (arg == "--trust-fingerprint" && i + 1 < argc)
+                    tls_config.expected_fingerprint = argv[++i];
+                else if (arg == "--trust-store" && i + 1 < argc)
+                    tls_config.trust_store_path = argv[++i];
+                else
+                {
+                    std::cerr << "Unknown or incomplete browse option: " << arg << "\n";
+                    return 1;
+                }
             }
-            return run_browser_list(browser_host, BROWSER_PORT);
+            return run_browser_list(browser_host, BROWSER_PORT, tls_config);
         }
 
         if (mode == "--help" || mode == "-h")

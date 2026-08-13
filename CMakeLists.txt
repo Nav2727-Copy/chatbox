@@ -21,6 +21,8 @@ endif()
 find_package(Boost REQUIRED COMPONENTS asio)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 
 if (WIN32)
@@ -58,10 +60,16 @@ set(CHATBOX_CORE_SOURCES
   "commands.cpp"
   "commands.h"
   "common.h"
+  "room.h"
   "dedicated_server.cpp"
   "dedicated_server.h"
   "server_browser.cpp"
   "server_browser.h"
+  "storage.cpp"
+  "storage.h"
+  "tls.cpp"
+  "tls.h"
+  "transport.h"
   "upnp_mapper.h"
   "utils.cpp"
   "utils.h"
@@ -74,6 +82,9 @@ target_link_libraries(chatbox_core
     Boost::asio
     miniupnpc::miniupnpc
     unofficial-sodium::sodium
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    SQLite::SQLite3
     Threads::Threads
 )
 target_compile_features(chatbox_core PUBLIC cxx_std_20)
@@ -110,4 +121,19 @@ if (BUILD_TESTING)
   target_link_libraries(chatbox_protocol_tests PRIVATE chatbox_protocol)
   target_compile_features(chatbox_protocol_tests PRIVATE cxx_std_20)
   add_test(NAME protocol COMMAND chatbox_protocol_tests)
+
+  add_executable(chatbox_room_integration_tests "tests/room_integration_tests.cpp")
+  target_link_libraries(chatbox_room_integration_tests PRIVATE chatbox_core)
+  target_compile_features(chatbox_room_integration_tests PRIVATE cxx_std_20)
+  add_test(NAME rooms COMMAND chatbox_room_integration_tests)
+
+  add_executable(chatbox_storage_tests "tests/storage_tests.cpp")
+  target_link_libraries(chatbox_storage_tests PRIVATE chatbox_core)
+  target_compile_features(chatbox_storage_tests PRIVATE cxx_std_20)
+  add_test(NAME storage COMMAND chatbox_storage_tests)
+
+  add_executable(chatbox_tls_tests "tests/tls_tests.cpp")
+  target_link_libraries(chatbox_tls_tests PRIVATE chatbox_core)
+  target_compile_features(chatbox_tls_tests PRIVATE cxx_std_20)
+  add_test(NAME tls COMMAND chatbox_tls_tests)
 endif()

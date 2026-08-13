@@ -67,9 +67,28 @@ int run_curses_app()
 
             noecho();
             std::string room_password = prompt_curses_password(7, 4,
-                "Room password (leave blank for none):");
+                "Server password (leave blank for none):");
 
             bool enable_upnp = prompt_curses_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
+
+            chatbox::tls::ServerConfig server_tls;
+            server_tls.enabled = prompt_curses_yes_no(12, 4,
+                "Require TLS transport? [Y/n]:");
+            if (server_tls.enabled)
+            {
+                char certificate_buf[LOGFILE_BUF_SIZE] = {};
+                char private_key_buf[LOGFILE_BUF_SIZE] = {};
+                echo();
+                erase(); box(stdscr, 0, 0);
+                mvprintw(2, 4, "Dedicated Server TLS");
+                mvprintw(4, 4, "Certificate chain path:");
+                move(5, 4); getnstr(certificate_buf, LOGFILE_MAX_LEN);
+                mvprintw(7, 4, "Private key path:");
+                move(8, 4); getnstr(private_key_buf, LOGFILE_MAX_LEN);
+                noecho();
+                server_tls.certificate_path = certificate_buf;
+                server_tls.private_key_path = private_key_buf;
+            }
 
             echo();
             mvprintw(12, 4, "Log file (blank chatlog.txt, 'none' disables, 'stdout' console only):");
@@ -87,7 +106,7 @@ int run_curses_app()
                 mvprintw(17, 4, "Browser server IP:");
                 move(18, 4);
                 getnstr(browser_host_buf, HOST_MAX_LEN);
-                mvprintw(20, 4, "Room name (blank default):");
+                mvprintw(20, 4, "Server listing name (blank default):");
                 move(21, 4);
                 getnstr(browser_name_buf, HOST_MAX_LEN);
                 mvprintw(23, 4, "Public IP/address clients should use (blank auto):");
@@ -112,6 +131,7 @@ int run_curses_app()
             config.password = room_password;
             config.enable_upnp = enable_upnp;
             config.publish_to_browser = publish_to_browser;
+            config.tls = std::move(server_tls);
 
             std::string logfile = logfile_buf;
             if (logfile == "none")
@@ -151,13 +171,31 @@ int run_curses_app()
         }
         else if (ch == 'b' || ch == 'B')
         {
+            chatbox::tls::ServerConfig browser_tls;
+            browser_tls.enabled = prompt_curses_yes_no(4, 4,
+                "Require TLS for browser traffic? [Y/n]:");
+            if (browser_tls.enabled)
+            {
+                char certificate_buf[LOGFILE_BUF_SIZE] = {};
+                char private_key_buf[LOGFILE_BUF_SIZE] = {};
+                echo();
+                erase(); box(stdscr, 0, 0);
+                mvprintw(2, 4, "Browser Server TLS");
+                mvprintw(4, 4, "Certificate chain path:");
+                move(5, 4); getnstr(certificate_buf, LOGFILE_MAX_LEN);
+                mvprintw(7, 4, "Private key path:");
+                move(8, 4); getnstr(private_key_buf, LOGFILE_MAX_LEN);
+                noecho();
+                browser_tls.certificate_path = certificate_buf;
+                browser_tls.private_key_path = private_key_buf;
+            }
             erase();
             box(stdscr, 0, 0);
             mvprintw(2, 4, "Starting browser server on port %d...", BROWSER_PORT);
             refresh();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             shutdown_curses_ui();
-            return run_browser_server(BROWSER_PORT);
+            return run_browser_server(BROWSER_PORT, std::move(browser_tls));
         }
     }
 
@@ -242,7 +280,7 @@ int run_curses_app()
 
             // Password setup (optional)
             std::string room_password = prompt_curses_password(7, 4,
-                "Room password (leave blank for none):");
+                "Server password (leave blank for none):");
 
             bool enable_upnp = prompt_curses_yes_no(10, 4, "Enable UPnP port forwarding? [Y/n]:");
 
@@ -256,13 +294,31 @@ int run_curses_app()
                 mvprintw(14, 4, "Browser server IP:");
                 move(15, 4);
                 getnstr(browser_host_buf, HOST_MAX_LEN);
-                mvprintw(17, 4, "Room name (blank uses nickname):");
+                mvprintw(17, 4, "Server listing name (blank uses nickname):");
                 move(18, 4);
                 getnstr(browser_name_buf, HOST_MAX_LEN);
                 mvprintw(20, 4, "Public IP/address clients should use (blank auto):");
                 move(21, 4);
                 getnstr(public_host_buf, HOST_MAX_LEN);
                 noecho();
+            }
+
+            chatbox::tls::ServerConfig host_tls;
+            erase(); box(stdscr, 0, 0);
+            host_tls.enabled = prompt_curses_yes_no(2, 4,
+                "Require TLS transport? [Y/n]:");
+            if (host_tls.enabled)
+            {
+                char certificate_buf[LOGFILE_BUF_SIZE] = {};
+                char private_key_buf[LOGFILE_BUF_SIZE] = {};
+                echo();
+                mvprintw(4, 4, "Certificate chain path:");
+                move(5, 4); getnstr(certificate_buf, LOGFILE_MAX_LEN);
+                mvprintw(7, 4, "Private key path:");
+                move(8, 4); getnstr(private_key_buf, LOGFILE_MAX_LEN);
+                noecho();
+                host_tls.certificate_path = certificate_buf;
+                host_tls.private_key_path = private_key_buf;
             }
 
             try
@@ -290,13 +346,17 @@ int run_curses_app()
                     }
                 }
 
+                auto host_storage = std::make_shared<chatbox::storage::SQLiteStorage>(
+                    "chatbox.db");
+                host_storage->import_legacy_files("bans.txt", "identities.txt");
                 server = std::make_unique<ChatServer>(
                     io,
                     port,
                     room_password,
                     nullptr,
-                    g_nickname);
-                server->load_identities("identities.txt");
+                    g_nickname,
+                    host_storage,
+                    host_tls);
                 if (!server->register_local_identity(g_nickname, local_identity.public_key_hex))
                 {
                     erase(); box(stdscr, 0, 0);
@@ -307,12 +367,12 @@ int run_curses_app()
                     continue;
                 }
 
-                add_user(g_nickname);
+                server->start_local_user();
                 push_message("[system] Hosting on port " + std::to_string(port));
                 push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
 
                 if (!room_password.empty())
-                    push_message("[system] Room password protection enabled");
+                    push_message("[system] Server password protection enabled");
 
                 std::string publish_host = sanitize_browser_field(public_host_buf, HOST_MAX_LEN);
 
@@ -383,12 +443,17 @@ int run_curses_app()
                     entry.host = publish_host;
                     entry.port = port;
                     entry.has_password = !room_password.empty();
+                    entry.uses_tls = host_tls.enabled;
 
                     browser_publisher = std::make_unique<ServerBrowserPublisher>(
                         browser_host,
                         BROWSER_PORT,
                         entry,
-                        [] { return static_cast<int>(connected_users().size()); });
+                        [&server] {
+                            return server
+                                ? static_cast<int>(server->connected_users().size())
+                                : 0;
+                        });
 
                     std::string error;
                     if (browser_publisher->start(error))
@@ -421,6 +486,7 @@ int run_curses_app()
         {
             std::string selected_host;
             uint16_t selected_port = 0;
+            chatbox::tls::ClientConfig client_tls;
 
             if (ch == 'b' || ch == 'B')
             {
@@ -435,6 +501,9 @@ int run_curses_app()
                 getnstr(browser_host_buf, HOST_MAX_LEN);
                 noecho();
 
+                client_tls.enabled = prompt_curses_yes_no(7, 4,
+                    "Use TLS for the browser connection? [Y/n]:");
+
                 std::string browser_host;
                 if (!parse_browser_address(browser_host_buf, browser_host))
                 {
@@ -447,7 +516,8 @@ int run_curses_app()
 
                 std::vector<BrowserEntry> entries;
                 std::string error;
-                if (!ServerBrowserClient::list_servers(browser_host, BROWSER_PORT, entries, error))
+                if (!ServerBrowserClient::list_servers(browser_host, BROWSER_PORT,
+                    entries, error, client_tls))
                 {
                     erase(); box(stdscr, 0, 0);
                     mvprintw(2, 4, "Could not query browser: %s", error.c_str());
@@ -495,6 +565,7 @@ int run_curses_app()
 
                 selected_host = entries[choice - 1].host;
                 selected_port = entries[choice - 1].port;
+                client_tls.enabled = entries[choice - 1].uses_tls;
             }
             else
             {
@@ -516,6 +587,9 @@ int run_curses_app()
 
                 noecho();
 
+                client_tls.enabled = prompt_curses_yes_no(10, 4,
+                    "Use TLS? Choose no only for an explicitly plaintext server. [Y/n]:");
+
                 selected_host = host_buf;
                 if (!parse_port(port_buf, selected_port))
                 {
@@ -529,12 +603,13 @@ int run_curses_app()
 
             try
             {
-                client = std::make_unique<ChatClient>(io);
+                client = std::make_unique<ChatClient>(io, client_tls);
                 client->set_identity(local_identity);
 
                 if (!client->connect(selected_host, selected_port))
                 {
-                    mvprintw(10, 4, "Connection failed.");
+                    mvprintw(10, 4, "Connection failed: %s",
+                        client->connect_error().c_str());
                     refresh();
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     client.reset();
@@ -624,7 +699,6 @@ int run_curses_app()
                     continue;
                 }
 
-                add_user(g_nickname);
                 push_message("[system] Connected to " + selected_host + ":" + std::to_string(selected_port));
                 push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
                 configured = true;
@@ -684,7 +758,7 @@ int run_curses_app()
                 // Shutdown client
                 if (!g_kicked)
                     client->send(chatbox::protocol::ClientMessage{
-                        chatbox::protocol::Leave{} });
+                        chatbox::protocol::Disconnect{} });
                 client->close();
                 if (network_thread.joinable())
                     network_thread.join();

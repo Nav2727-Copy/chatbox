@@ -12,14 +12,23 @@ extern std::mutex g_mutex;
 extern std::deque<std::string> g_messages;
 extern std::vector<std::string> g_users;
 extern std::string g_nickname;
+extern std::vector<chatbox::protocol::RoomSummary> g_rooms;
+extern chatbox::protocol::RoomId g_active_room_id;
+extern std::string g_active_room_name;
+extern std::string g_active_room_topic;
 
 extern std::atomic<bool> g_shutdown_requested;
 extern std::atomic<bool> g_kicked;
 
 void push_message(const std::string& msg);
-void add_user(const std::string& user);
-void remove_user(const std::string& user);
 std::vector<std::string> message_snapshot();
 std::vector<std::string> user_snapshot();
 void reset_chat_state();
-std::vector<std::string> connected_users();
+void activate_room(chatbox::protocol::RoomId id,
+    const std::string& name,
+    const std::string& topic);
+void update_room_topic(chatbox::protocol::RoomId id, const std::string& topic);
+void update_room_list(const std::vector<chatbox::protocol::RoomSummary>& rooms);
+chatbox::protocol::RoomId active_room_id();
+std::string active_room_name();
+std::string active_room_topic();

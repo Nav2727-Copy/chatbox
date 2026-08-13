@@ -2,29 +2,33 @@
 
 void ClientSession::start()
 {
-    deliver(chatbox::protocol::ServerMessage{
-        chatbox::protocol::Hello{ chatbox::protocol::VERSION } });
-
-    read_loop();
+    auto self = shared_from_this();
+    stream_.async_server_handshake(
+        [this, self](boost::system::error_code ec)
+        {
+            if (ec)
+            {
+                server_.disconnect(self, false);
+                stream_.close();
+                return;
+            }
+            deliver(chatbox::protocol::ServerMessage{
+                chatbox::protocol::Hello{ chatbox::protocol::VERSION } });
+            read_loop();
+        });
 }
 
 void ClientSession::read_loop()
 {
     auto self = shared_from_this();
 
-    boost::asio::async_read_until(
-        socket_, buffer_, '\n',
+    stream_.async_read_until(
+        buffer_, '\n',
         [this, self](boost::system::error_code ec, std::size_t)
         {
             if (ec)
             {
-                server_.leave(self);
-                if (!nickname_.empty() && !suppress_leave_notice_)
-                {
-                    remove_user(nickname_);
-                    server_.broadcast("[system] " + nickname_ + " left");
-                    server_.broadcast_users();
-                }
+                server_.disconnect(self, !suppress_leave_notice_);
                 return;
             }
 
@@ -40,7 +44,7 @@ void ClientSession::read_loop()
                 if (parsed.error == chatbox::protocol::Error::UnsupportedVersion)
                 {
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
                 read_loop();
@@ -78,7 +82,7 @@ void ClientSession::read_loop()
                 deliver(chatbox::protocol::ServerMessage{
                     chatbox::protocol::ServerError{ "Protocol handshake required" } });
                 close();
-                server_.leave(self);
+                server_.disconnect(self, false);
                 return;
             }
 
@@ -96,7 +100,7 @@ void ClientSession::read_loop()
                     deliver(chatbox::protocol::ServerMessage{
                         chatbox::protocol::AuthRejected{} });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
                 read_loop();
@@ -132,7 +136,7 @@ void ClientSession::read_loop()
                     deliver(chatbox::protocol::ServerMessage{
                         chatbox::protocol::JoinRejected{ identity_error } });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -140,7 +144,7 @@ void ClientSession::read_loop()
                 {
                     deliver(chatbox::protocol::ServerMessage{ chatbox::protocol::Banned{} });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -149,7 +153,7 @@ void ClientSession::read_loop()
                     deliver(chatbox::protocol::ServerMessage{
                         chatbox::protocol::NicknameTaken{} });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -178,7 +182,7 @@ void ClientSession::read_loop()
                         chatbox::protocol::JoinRejected{
                             "Identify before sending proof" } });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -190,7 +194,7 @@ void ClientSession::read_loop()
                     deliver(chatbox::protocol::ServerMessage{
                         chatbox::protocol::JoinRejected{ "Identity proof failed" } });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -198,7 +202,7 @@ void ClientSession::read_loop()
                 {
                     deliver(chatbox::protocol::ServerMessage{ chatbox::protocol::Banned{} });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -207,7 +211,7 @@ void ClientSession::read_loop()
                     deliver(chatbox::protocol::ServerMessage{
                         chatbox::protocol::NicknameTaken{} });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
@@ -217,24 +221,21 @@ void ClientSession::read_loop()
                         chatbox::protocol::JoinRejected{
                             "Identity registration failed" } });
                     close();
-                    server_.leave(self);
+                    server_.disconnect(self, false);
                     return;
                 }
 
-                nickname_ = pending_nickname_;
+                set_nickname(pending_nickname_);
                 const std::string fingerprint = identity_fingerprint(pending_public_key_hex_);
                 pending_nickname_.clear();
                 pending_public_key_hex_.clear();
                 pending_challenge_.clear();
 
-                add_user(nickname_);
                 deliver(chatbox::protocol::ServerMessage{
                     chatbox::protocol::IdentityAccepted{ fingerprint } });
                 deliver(chatbox::protocol::ServerMessage{
                     chatbox::protocol::JoinAccepted{} });
-                server_.deliver_history(self);
-                server_.broadcast("[system] " + nickname_ + " joined");
-                server_.broadcast_users();
+                server_.admit_to_default_room(self);
             }
             // ---- LEAVE ----
             else if (std::holds_alternative<chatbox::protocol::Leave>(message))
@@ -246,11 +247,81 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                std::string leaving_nick = nickname_;
-                nickname_.clear();
-                remove_user(leaving_nick);
-                server_.broadcast("[system] " + leaving_nick + " left");
-                server_.broadcast_users();
+                std::string error;
+                if (!server_.leave_room(self, error))
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::ServerError{ error } });
+            }
+            // ---- DISCONNECT ----
+            else if (std::holds_alternative<chatbox::protocol::Disconnect>(message))
+            {
+                server_.disconnect(self, true);
+                close();
+                return;
+            }
+            // ---- ROOMS ----
+            else if (std::holds_alternative<chatbox::protocol::ListRooms>(message))
+            {
+                if (nickname_.empty())
+                {
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::ServerError{ "Join before listing rooms" } });
+                }
+                else
+                {
+                    server_.send_room_list(self);
+                }
+            }
+            // ---- CREATE ----
+            else if (const auto* create =
+                std::get_if<chatbox::protocol::CreateRoom>(&message))
+            {
+                std::string error;
+                if (nickname_.empty())
+                    error = "Join before creating rooms";
+                else if (server_.create_room(self, create->name, error))
+                {
+                    read_loop();
+                    return;
+                }
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::ServerError{ error } });
+            }
+            // ---- JOIN ROOM ----
+            else if (const auto* join_room =
+                std::get_if<chatbox::protocol::JoinRoom>(&message))
+            {
+                std::string error;
+                if (nickname_.empty())
+                    error = "Join before switching rooms";
+                else if (server_.join_room(self, join_room->name, error))
+                {
+                    read_loop();
+                    return;
+                }
+                deliver(chatbox::protocol::ServerMessage{
+                    chatbox::protocol::ServerError{ error } });
+            }
+            // ---- TOPIC ----
+            else if (const auto* topic =
+                std::get_if<chatbox::protocol::TopicRequest>(&message))
+            {
+                if (nickname_.empty())
+                {
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::ServerError{ "Join before viewing a topic" } });
+                }
+                else if (!topic->topic)
+                {
+                    server_.send_topic(self);
+                }
+                else
+                {
+                    std::string error;
+                    if (!server_.set_topic(self, *topic->topic, error))
+                        deliver(chatbox::protocol::ServerMessage{
+                            chatbox::protocol::ServerError{ error } });
+                }
             }
             // ---- MSG ----
             else if (const auto* chat = std::get_if<chatbox::protocol::Chat>(&message))
@@ -278,7 +349,9 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                server_.broadcast("[" + timestamp() + "] " + nickname_ + ": " + chat->body);
+                server_.broadcast_room(active_room_id(),
+                    "[" + timestamp() + "] " + nickname_ + ": " + chat->body,
+                    nickname_);
             }
             // ---- WHISPER ----
             else if (const auto* whisper =
@@ -308,7 +381,24 @@ void ClientSession::read_loop()
                     return;
                 }
 
-                server_.send_private(nickname_, whisper->target, whisper->body);
+                server_.send_private_from(self, whisper->target, whisper->body);
+            }
+            // ---- KICK ----
+            else if (const auto* kick =
+                std::get_if<chatbox::protocol::KickRequest>(&message))
+            {
+                if (nickname_.empty())
+                {
+                    deliver(chatbox::protocol::ServerMessage{
+                        chatbox::protocol::ServerError{ "Join before moderating a room" } });
+                }
+                else
+                {
+                    std::string error;
+                    if (!server_.kick_from(self, kick->nickname, kick->reason, error))
+                        deliver(chatbox::protocol::ServerMessage{
+                            chatbox::protocol::ServerError{ error } });
+                }
             }
             else
             {
@@ -324,13 +414,14 @@ bool ClientSession::consume_message_quota()
     const auto now = std::chrono::steady_clock::now();
     const auto window = std::chrono::seconds(RATE_LIMIT_WINDOW_SECONDS);
 
-    while (!recent_messages_.empty() && now - recent_messages_.front() > window)
-        recent_messages_.pop_front();
+    auto& recent_messages = recent_messages_by_room_[active_room_id()];
+    while (!recent_messages.empty() && now - recent_messages.front() > window)
+        recent_messages.pop_front();
 
-    if (recent_messages_.size() >= RATE_LIMIT_MESSAGES)
+    if (recent_messages.size() >= RATE_LIMIT_MESSAGES)
         return false;
 
-    recent_messages_.push_back(now);
+    recent_messages.push_back(now);
     return true;
 }
 
@@ -345,7 +436,7 @@ void ClientSession::deliver(const chatbox::protocol::ServerMessage& msg)
 
     auto self = shared_from_this();
     boost::asio::post(
-        socket_.get_executor(),
+        stream_.get_executor(),
         [this, self, wire = std::move(*encoded.value)]
         {
             const bool writing = !write_queue_.empty();
@@ -363,8 +454,8 @@ void ClientSession::deliver_text(const std::string& text)
 void ClientSession::write_next()
 {
     auto self = shared_from_this();
-    boost::asio::async_write(
-        socket_, boost::asio::buffer(write_queue_.front()),
+    stream_.async_write(
+        boost::asio::buffer(write_queue_.front()),
         [this, self](boost::system::error_code ec, std::size_t)
         {
             if (ec)
@@ -383,9 +474,7 @@ void ClientSession::write_next()
 
             if (close_after_write_)
             {
-                boost::system::error_code ignored;
-                socket_.shutdown(tcp::socket::shutdown_both, ignored);
-                socket_.close(ignored);
+                stream_.close();
             }
         });
 }
@@ -394,7 +483,7 @@ void ClientSession::close()
 {
     auto self = shared_from_this();
     boost::asio::post(
-        socket_.get_executor(),
+        stream_.get_executor(),
         [this, self]
         {
             suppress_leave_notice_ = true;
@@ -404,8 +493,6 @@ void ClientSession::close()
                 return;
             }
 
-            boost::system::error_code ignored;
-            socket_.shutdown(tcp::socket::shutdown_both, ignored);
-            socket_.close(ignored);
+            stream_.close();
         });
 }

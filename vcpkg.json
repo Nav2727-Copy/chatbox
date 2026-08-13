@@ -12,6 +12,8 @@
       "platform": "!windows"
     },
     "miniupnpc",
-    "libsodium"
+    "libsodium",
+    "openssl",
+    "sqlite3"
   ]
 }

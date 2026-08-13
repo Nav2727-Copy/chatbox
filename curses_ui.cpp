@@ -100,14 +100,38 @@ void draw_curses_chat_ui(const std::string& input)
         box(input_win, 0, 0);
     }
 
-    wattron(users_win, COLOR_PAIR(1)); mvwprintw(users_win, 0, 2, " Users "); wattroff(users_win, COLOR_PAIR(1));
-    wattron(chat_win, COLOR_PAIR(2)); mvwprintw(chat_win, 0, 2, " Chat ");  wattroff(chat_win, COLOR_PAIR(2));
+    wattron(users_win, COLOR_PAIR(1)); mvwprintw(users_win, 0, 2, " Rooms / Users "); wattroff(users_win, COLOR_PAIR(1));
     wattron(input_win, COLOR_PAIR(3)); mvwprintw(input_win, 0, 2, " Input "); wattroff(input_win, COLOR_PAIR(3));
 
     {
         std::lock_guard lock(g_mutex);
 
+        std::string title = " #" +
+            (g_active_room_name.empty() ? std::string("lobby") : g_active_room_name);
+        if (!g_active_room_topic.empty())
+            title += " | " + g_active_room_topic;
+        title += " ";
+        const int title_limit = std::max(1, getmaxx(chat_win) - 4);
+        if (static_cast<int>(title.size()) > title_limit)
+            title.resize(static_cast<std::size_t>(title_limit));
+        wattron(chat_win, COLOR_PAIR(2));
+        mvwprintw(chat_win, 0, 2, "%s", title.c_str());
+        wattroff(chat_win, COLOR_PAIR(2));
+
         int y = 1;
+        mvwprintw(users_win, y++, 2, "Rooms:");
+        for (const auto& room : g_rooms)
+        {
+            if (y >= rows - INPUT_WINDOW_HEIGHT - 3) break;
+            std::string room_line = std::string(room.id == g_active_room_id ? "* " : "  ")
+                + room.name + " (" + std::to_string(room.user_count) + ")";
+            if (room_line.size() > USERS_WINDOW_WIDTH - 4)
+                room_line.resize(USERS_WINDOW_WIDTH - 4);
+            mvwprintw(users_win, y++, 2, "%s", room_line.c_str());
+        }
+
+        if (y < rows - INPUT_WINDOW_HEIGHT - 2)
+            mvwprintw(users_win, y++, 2, "Users:");
         for (const auto& user : g_users)
         {
             if (y >= rows - INPUT_WINDOW_HEIGHT - 1) break;

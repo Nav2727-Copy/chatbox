@@ -122,6 +122,17 @@ Existing `/users`, `/whisper`, `/kick`, `/ban`, and `/bans` behavior must be exp
 - Messages and user lists never leak between rooms.
 - Room names, topics, and permissions are validated server-side.
 
+### Implementation status
+
+Phase 1 was completed on 2026-08-12:
+
+- Protocol v3 adds typed room-list, create, join, leave, topic, room-text, and room-user-list messages with explicit room IDs.
+- Every server starts with a `lobby` and can host up to 32 case-insensitively unique named rooms.
+- Sessions have one active room; public messages, histories, user lists, whispers, kicks, and rate-limit windows are room-scoped.
+- Room creators can change their room topic and kick members; the interactive host and dedicated-server administrator can moderate explicitly selected rooms. Bans remain server-wide.
+- The curses UI shows rooms, membership counts, the active room, and its topic, and replaces the transcript when a room switch succeeds.
+- Protocol tests cover room message round trips and validation. A loopback integration test covers authentication, room creation/switching, message and whisper isolation, destination history, user lists, and moderation permissions.
+
 ## Phase 2: SQLite persistence
 
 Replace in-memory-only history and the flat identity and ban files with a versioned SQLite database.
@@ -184,6 +195,16 @@ The final schema may add indexes, moderation metadata, or separate server-event 
 - History queries are bounded and paginated.
 - Database schema upgrades are tested.
 
+### Implementation status
+
+Phase 2 was completed on 2026-08-12:
+
+- Rooms, topics, bounded room histories, bans, and nickname identity bindings are stored in a versioned SQLite database with foreign keys and WAL mode enabled.
+- Networking code talks to a storage interface; SQLite writes run on a bounded worker queue and are committed in batched transactions instead of blocking the Asio event loop.
+- Dedicated servers accept `--database <path>` and `--history-limit <n>`. Existing `bans.txt` and `identities.txt` files are imported once into the database.
+- History reads are capped at 500 rows and use stable `(sent_at, id)` cursors for pagination. The configured join-history limit remains in memory per room.
+- Storage tests cover clean-restart persistence, bounded pagination, one-time legacy imports, and transactional upgrades from the original schema.
+
 ## Phase 3: TLS transport
 
 TLS protects passwords, messages, identity proofs, and room metadata while they travel between a client and server. Base64 framing is not encryption and may remain only as a wire-format detail until the versioned protocol replaces it.
@@ -218,6 +239,17 @@ Private keys must never be logged or stored in the SQLite database. Password-pro
 - Clients verify the server certificate or a previously trusted fingerprint.
 - Certificate changes produce a visible blocking warning.
 - Plaintext compatibility, if retained, requires an explicit option.
+
+### Implementation status
+
+Phase 3 was completed on 2026-08-12:
+
+- Chat and server-browser connections use Boost.Asio SSL streams and complete a TLS handshake before any protocol, password, identity, room, or browser data is exchanged.
+- Dedicated chat and browser servers load PEM certificate chains and private keys. Their SHA-256 certificate fingerprint is displayed for out-of-band verification, while private-key material is never logged or stored in SQLite.
+- Clients accept publicly trusted or custom-CA certificates, explicit SHA-256 pins, or a per-address trust-on-first-use fingerprint. A changed TOFU certificate is blocked with the old and new fingerprints shown.
+- Command-line server modes require TLS by default. Plaintext chat/browser compatibility is available only through explicit `--allow-plaintext`, `--plaintext`, or interactive confirmation.
+- Browser listings advertise whether the destination chat server uses TLS, preventing a browsed client from silently trying a different transport.
+- TLS integration tests cover CA validation, explicit pins, TOFU enrollment, changed-certificate blocking, explicit plaintext operation, and encrypted server-browser requests.
 
 ## Phase 4: Signed messages
 

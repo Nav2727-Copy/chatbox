@@ -47,11 +47,11 @@ void typed_messages_round_trip()
     CHECK(parsed_hello);
     CHECK(std::get<protocol::Hello>(*parsed_hello.value).version == protocol::VERSION);
 
-    const protocol::ServerMessage users = protocol::UserList{ { "alice", "bob" } };
+    const protocol::ServerMessage users = protocol::UserList{ 1, { "alice", "bob" } };
     const auto users_frame = protocol::encode_server_frame(users);
     const auto parsed_users = protocol::decode_server_frame(*users_frame.value);
     CHECK(parsed_users);
-    CHECK(protocol::serialize(users) == "USERS|alice,bob");
+    CHECK(protocol::serialize(users) == "USERS|1|alice,bob");
     CHECK(std::get<protocol::UserList>(*parsed_users.value).nicknames.size() == 2);
     CHECK(std::get<protocol::UserList>(*parsed_users.value).nicknames[1] == "bob");
 
@@ -60,6 +60,65 @@ void typed_messages_round_trip()
     const auto parsed_text = protocol::decode_server_frame(*text_frame.value);
     CHECK(parsed_text);
     CHECK(std::get<protocol::Text>(*parsed_text.value).body == "[12:00:00] alice: a|b");
+}
+
+void room_messages_round_trip()
+{
+    const protocol::ClientMessage create = protocol::CreateRoom{ "games_2" };
+    const auto parsed_create = protocol::decode_client_frame(
+        *protocol::encode_client_frame(create).value);
+    CHECK(parsed_create);
+    CHECK(std::get<protocol::CreateRoom>(*parsed_create.value).name == "games_2");
+
+    const protocol::ClientMessage topic =
+        protocol::TopicRequest{ std::string("Build | test") };
+    const auto parsed_topic = protocol::decode_client_frame(
+        *protocol::encode_client_frame(topic).value);
+    CHECK(parsed_topic);
+    CHECK(*std::get<protocol::TopicRequest>(*parsed_topic.value).topic == "Build | test");
+
+    const protocol::ServerMessage rooms = protocol::RoomList{ {
+        { 1, "lobby", 2 }, { 2, "games", 1 } } };
+    const auto parsed_rooms = protocol::decode_server_frame(
+        *protocol::encode_server_frame(rooms).value);
+    CHECK(parsed_rooms);
+    CHECK(std::get<protocol::RoomList>(*parsed_rooms.value).rooms.size() == 2);
+    CHECK(std::get<protocol::RoomList>(*parsed_rooms.value).rooms[1].id == 2);
+
+    const protocol::ServerMessage joined =
+        protocol::RoomJoined{ 2, "games", "Play | nicely" };
+    const auto parsed_joined = protocol::decode_server_frame(
+        *protocol::encode_server_frame(joined).value);
+    CHECK(parsed_joined);
+    CHECK(std::get<protocol::RoomJoined>(*parsed_joined.value).topic == "Play | nicely");
+
+    const protocol::ServerMessage text =
+        protocol::RoomText{ 2, "[12:00] alice: scoped" };
+    const auto parsed_text = protocol::decode_server_frame(
+        *protocol::encode_server_frame(text).value);
+    CHECK(parsed_text);
+    CHECK(std::get<protocol::RoomText>(*parsed_text.value).room_id == 2);
+}
+
+void room_validation_is_enforced()
+{
+    CHECK(protocol::is_valid_room_name("lobby"));
+    CHECK(protocol::is_valid_room_name("dev-room_2"));
+    CHECK(!protocol::is_valid_room_name(""));
+    CHECK(!protocol::is_valid_room_name("room with spaces"));
+    CHECK(!protocol::is_valid_room_name("room|pipe"));
+    CHECK(!protocol::is_valid_room_name(
+        std::string(protocol::MAX_ROOM_NAME_LENGTH + 1, 'r')));
+
+    const auto bad_create = protocol::encode_frame("CREATE|bad room");
+    CHECK(protocol::decode_client_frame(*bad_create.value).error ==
+        protocol::Error::InvalidField);
+    const auto bad_room_id = protocol::encode_frame("ROOM|0|lobby|");
+    CHECK(protocol::decode_server_frame(*bad_room_id.value).error ==
+        protocol::Error::InvalidField);
+    const auto malformed_rooms = protocol::encode_frame("ROOMS|1,lobby");
+    CHECK(protocol::decode_server_frame(*malformed_rooms.value).error ==
+        protocol::Error::InvalidField);
 }
 
 void malformed_frames_are_rejected()
@@ -81,10 +140,10 @@ void malformed_frames_are_rejected()
 
 void versions_are_enforced()
 {
-    const auto old_hello = protocol::encode_frame("HELLO|1");
+    const auto old_hello = protocol::encode_frame("HELLO|2");
     const auto parsed = protocol::decode_client_frame(*old_hello.value);
     CHECK(parsed.error == protocol::Error::UnsupportedVersion);
-    CHECK(parsed.detail.find("1") != std::string::npos);
+    CHECK(parsed.detail.find("2") != std::string::npos);
 }
 
 void size_limits_are_enforced()
@@ -109,6 +168,8 @@ int main()
 {
     valid_frame_round_trip();
     typed_messages_round_trip();
+    room_messages_round_trip();
+    room_validation_is_enforced();
     malformed_frames_are_rejected();
     versions_are_enforced();
     size_limits_are_enforced();

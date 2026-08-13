@@ -2,6 +2,7 @@
 
 #include "chat_log.h"
 #include "chat_server.h"
+#include "storage.h"
 #include "upnp_mapper.h"
 #include "utils.h"
 
@@ -14,22 +15,36 @@ void show_dedicated_usage()
         << "  chatbox --browser\n"
         << "  chatbox --browse <browser-host>\n\n"
         << "Options:\n"
-        << "  --password <password>  - set the room password\n"
+        << "  --password <password>  - set the server password\n"
         << "  --log <file>           - write logs to a file\n"
-        << "  --identities <file>    - store nickname identity keys in a file\n"
-        << "  --publish <host>     - publish this server to a browser server on port 2727\n"
+        << "  --database <path>      - SQLite database (default chatbox.db)\n"
+        << "  --history-limit <n>    - in-memory/join history size (1-500)\n"
+        << "  --import-bans <file>   - one-time import from a legacy bans file\n"
+        << "  --import-identities <file> - one-time import from a legacy identity file\n"
+        << "  --tls-cert <path>      - PEM certificate chain\n"
+        << "  --tls-key <path>       - PEM certificate private key\n"
+        << "  --require-tls          - require TLS (the default)\n"
+        << "  --allow-plaintext      - explicitly run without TLS\n"
+        << "  --publish <host>       - publish to a browser server on port 2727\n"
+        << "  --browser-plaintext    - explicitly publish to a plaintext browser\n"
+        << "  --browser-tls-ca <path> - CA file for browser TLS\n"
+        << "  --browser-trust-fingerprint <sha256> - pin browser certificate\n"
+        << "  --browser-trust-store <path> - browser TOFU fingerprint file\n"
         << "  --name <name>          - room name shown in the server browser\n"
         << "  --public-host <host>   - host/address clients should connect to from browser results\n"
         << "  --log-stdout           - print logs only to stdout\n"
         << "  --no-log               - disable chat logging\n"
         << "  --no-upnp              - skip UPnP port forwarding\n\n"
         << "Dedicated server admin commands:\n"
-        << "  /kick <nick> [reason]  - kick a connected user\n"
-        << "  /ban  <nick> [reason]  - ban a user and persist it\n"
+        << "  /rooms                 - list rooms and room-local user counts\n"
+        << "  /create <room>         - create a room\n"
+        << "  /users <room>          - list users in one room\n"
+        << "  /topic <room> <text>   - set a room topic\n"
+        << "  /kick <room> <nick> [reason] - kick a user from one room\n"
+        << "  /ban  <nick> [reason]  - ban a user server-wide and persist it\n"
         << "  /unban <nick>          - remove a persisted ban\n"
         << "  /bans                  - list banned nicknames\n"
-        << "  /users                 - list connected users\n"
-        << "  /broadcast <msg>       - send a server announcement\n"
+        << "  /broadcast <msg>       - announce to every room\n"
         << "  /quit                  - shut down the server\n"
         << "  /help                  - show this help\n";
 }
@@ -76,6 +91,7 @@ std::string browser_entry_summary(const BrowserEntry& entry)
     return entry.name + " | " + entry.host + ":" + std::to_string(entry.port)
         + " | users " + std::to_string(entry.users)
         + (entry.has_password ? " | password" : " | open")
+        + (entry.uses_tls ? " | TLS" : " | plaintext")
         + " | seen " + std::to_string(std::max<long long>(0, age)) + "s ago";
 }
 
@@ -131,12 +147,29 @@ ConsoleExitReason browser_console(ServerBrowser& browser, std::atomic<bool>& qui
     return ConsoleExitReason::InputClosed;
 }
 
-int run_browser_server(uint16_t port)
+int run_browser_server(uint16_t port, chatbox::tls::ServerConfig tls_config)
 {
     boost::asio::io_context io;
-    ServerBrowser browser(io, port);
+    const auto browser_fingerprint = tls_config.enabled
+        ? chatbox::tls::certificate_sha256_fingerprint(tls_config.certificate_path)
+        : std::string{};
+    std::unique_ptr<ServerBrowser> browser_ptr;
+    try
+    {
+        browser_ptr = std::make_unique<ServerBrowser>(
+            io, port, std::move(tls_config));
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Could not start browser server: " << ex.what() << "\n";
+        return 1;
+    }
+    ServerBrowser& browser = *browser_ptr;
 
     std::cout << "chatbox server browser running on port " << port << "\n";
+    if (!browser_fingerprint.empty())
+        std::cout << "[browser] TLS certificate SHA-256: "
+            << browser_fingerprint << "\n";
     UPnPMapper upnp;
     if (upnp.discover())
     {
@@ -193,11 +226,12 @@ int run_browser_server(uint16_t port)
     return 0;
 }
 
-int run_browser_list(const std::string& host, uint16_t port)
+int run_browser_list(const std::string& host, uint16_t port,
+    const chatbox::tls::ClientConfig& tls_config)
 {
     std::vector<BrowserEntry> entries;
     std::string error;
-    if (!ServerBrowserClient::list_servers(host, port, entries, error))
+    if (!ServerBrowserClient::list_servers(host, port, entries, error, tls_config))
     {
         std::cerr << "Could not query browser server: " << error << "\n";
         return 1;
@@ -240,22 +274,52 @@ ConsoleExitReason admin_console(ChatServer& server, std::atomic<bool>& quit_flag
         {
             show_dedicated_usage();
         }
-        else if (cmd == "/users")
+        else if (cmd == "/rooms")
         {
-            auto users = server.connected_users();
+            const auto rooms = server.room_list();
+            for (const auto& room : rooms.rooms)
+                std::cout << "  - " << room.name << " ("
+                    << room.user_count << ")\n";
+        }
+        else if (cmd == "/create" && parts.size() == 2)
+        {
+            std::string error;
+            if (server.create_admin_room(parts[1], error))
+                std::cout << "Created room: " << parts[1] << "\n";
+            else
+                std::cout << error << "\n";
+        }
+        else if (cmd == "/users" && parts.size() == 2)
+        {
+            std::string error;
+            auto users = server.users_in_room(parts[1], error);
+            if (!error.empty())
+            {
+                std::cout << error << "\n";
+                continue;
+            }
             if (users.empty())
-                std::cout << "(no users connected)\n";
+                std::cout << "(no users in #" << parts[1] << ")\n";
             else
                 for (const auto& user : users)
                     std::cout << "  - " << user << "\n";
         }
-        else if (cmd == "/kick" && parts.size() >= 2)
+        else if (cmd == "/topic" && parts.size() >= 3)
         {
-            std::string reason = join_args(parts, 2);
-            if (server.kick_user(parts[1], reason))
-                std::cout << "Kicked: " << parts[1] << "\n";
+            std::string error;
+            if (server.set_admin_topic(parts[1], join_args(parts, 2), error))
+                std::cout << "Updated topic for #" << parts[1] << "\n";
             else
-                std::cout << "User not found: " << parts[1] << "\n";
+                std::cout << error << "\n";
+        }
+        else if (cmd == "/kick" && parts.size() >= 3)
+        {
+            std::string error;
+            if (server.kick_user_in_room(
+                parts[1], parts[2], join_args(parts, 3), error))
+                std::cout << "Kicked " << parts[2] << " from #" << parts[1] << "\n";
+            else
+                std::cout << error << "\n";
         }
         else if (cmd == "/ban" && parts.size() >= 2)
         {
@@ -293,6 +357,14 @@ ConsoleExitReason admin_console(ChatServer& server, std::atomic<bool>& quit_flag
 
 int run_dedicated_server_config(const DedicatedServerConfig& config)
 {
+    if (config.tls.enabled &&
+        (config.tls.certificate_path.empty() || config.tls.private_key_path.empty()))
+    {
+        std::cerr << "TLS is required by default. Supply --tls-cert and --tls-key, "
+            "or explicitly use --allow-plaintext.\n";
+        return 1;
+    }
+
     std::unique_ptr<ChatLog> log;
     if (config.enable_logging)
     {
@@ -312,11 +384,45 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     log_admin("[admin] Starting dedicated server on port " + std::to_string(config.port));
     if (!config.password.empty())
         log_admin("[admin] Password protection enabled");
+    if (config.tls.enabled)
+    {
+        const auto fingerprint = chatbox::tls::certificate_sha256_fingerprint(
+            config.tls.certificate_path);
+        if (!fingerprint.empty())
+            log_admin("[security] TLS certificate SHA-256: " + fingerprint);
+    }
 
     boost::asio::io_context io;
-    ChatServer server(io, config.port, config.password, log.get());
-    server.load_identities(config.identities_file);
-    server.load_bans(config.bans_file);
+    std::shared_ptr<chatbox::storage::SQLiteStorage> storage;
+    try
+    {
+        storage = std::make_shared<chatbox::storage::SQLiteStorage>(config.database);
+        const auto imported = storage->import_legacy_files(
+            config.bans_file, config.identities_file);
+        if (imported.bans || imported.identities)
+            log_admin("[storage] Imported " + std::to_string(imported.bans)
+                + " legacy ban(s) and " + std::to_string(imported.identities)
+                + " identity binding(s)");
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Could not initialize server database: " << ex.what() << "\n";
+        return 1;
+    }
+
+    std::unique_ptr<ChatServer> server_ptr;
+    try
+    {
+        server_ptr = std::make_unique<ChatServer>(io, config.port,
+            config.password, log.get(), "", storage, config.tls,
+            config.history_limit);
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "Could not start server: " << ex.what() << "\n";
+        return 1;
+    }
+    ChatServer& server = *server_ptr;
 
     UPnPMapper upnp;
     std::string publish_host = config.browser_public_host;
@@ -378,12 +484,14 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
         entry.host = publish_host;
         entry.port = config.port;
         entry.has_password = !config.password.empty();
+        entry.uses_tls = config.tls.enabled;
 
         publisher = std::make_unique<ServerBrowserPublisher>(
             config.browser_host,
             BROWSER_PORT,
             entry,
-            [&server] { return static_cast<int>(server.connected_users().size()); });
+            [&server] { return static_cast<int>(server.connected_users().size()); },
+            config.browser_tls);
 
         std::string error;
         if (publisher->start(error))
@@ -407,8 +515,9 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
         std::cout << "stdout only";
     else
         std::cout << config.logfile;
-    std::cout << " | Bans: " << config.bans_file << "\n";
-    std::cout << "Identities: " << config.identities_file << "\n";
+    std::cout << " | Database: " << config.database << "\n";
+    std::cout << "Transport: " << (config.tls.enabled ? "TLS" : "PLAINTEXT (explicit)")
+        << "\n";
 
     std::atomic<bool> quit_flag(false);
     std::thread network_thread([&] { io.run(); });
@@ -468,6 +577,18 @@ int run_dedicated_server(int argc, char* argv[])
             config.enable_logging = true;
             config.log_to_stdout_only = true;
         }
+        else if (arg == "--allow-plaintext")
+        {
+            config.tls.enabled = false;
+        }
+        else if (arg == "--require-tls")
+        {
+            config.tls.enabled = true;
+        }
+        else if (arg == "--browser-plaintext")
+        {
+            config.browser_tls.enabled = false;
+        }
         else if (arg == "--password" && i + 1 < argc)
         {
             config.password = argv[++i];
@@ -480,9 +601,59 @@ int run_dedicated_server(int argc, char* argv[])
             config.log_to_stdout_only = false;
             positional_log_set = true;
         }
+        else if (arg == "--database" && i + 1 < argc)
+        {
+            config.database = argv[++i];
+        }
+        else if (arg == "--history-limit" && i + 1 < argc)
+        {
+            try
+            {
+                const auto value = std::stoul(argv[++i]);
+                if (value < 1 || value > chatbox::storage::SQLiteStorage::MAX_HISTORY_PAGE)
+                    throw std::out_of_range("history limit");
+                config.history_limit = value;
+            }
+            catch (...)
+            {
+                std::cerr << "--history-limit must be between 1 and 500\n";
+                return 1;
+            }
+        }
+        else if (arg == "--tls-cert" && i + 1 < argc)
+        {
+            config.tls.certificate_path = argv[++i];
+            config.tls.enabled = true;
+        }
+        else if (arg == "--tls-key" && i + 1 < argc)
+        {
+            config.tls.private_key_path = argv[++i];
+            config.tls.enabled = true;
+        }
+        else if (arg == "--import-bans" && i + 1 < argc)
+        {
+            config.bans_file = argv[++i];
+        }
+        else if (arg == "--import-identities" && i + 1 < argc)
+        {
+            config.identities_file = argv[++i];
+        }
         else if (arg == "--identities" && i + 1 < argc)
         {
             config.identities_file = argv[++i];
+        }
+        else if ((arg == "--browser-tls-ca" || arg == "--tls-ca") &&
+            i + 1 < argc)
+        {
+            config.browser_tls.ca_path = argv[++i];
+        }
+        else if (arg == "--browser-trust-fingerprint" && i + 1 < argc)
+        {
+            config.browser_tls.expected_fingerprint = argv[++i];
+        }
+        else if (arg == "--browser-trust-store" && i + 1 < argc)
+        {
+            config.browser_tls.trust_store_path = argv[++i];
         }
         else if (arg == "--publish" && i + 1 < argc)
         {
@@ -510,6 +681,11 @@ int run_dedicated_server(int argc, char* argv[])
             return 0;
         }
         else if (arg == "--password" || arg == "--log" || arg == "--identities"
+            || arg == "--database" || arg == "--tls-cert" || arg == "--tls-key"
+            || arg == "--history-limit"
+            || arg == "--import-bans" || arg == "--import-identities"
+            || arg == "--browser-tls-ca" || arg == "--tls-ca"
+            || arg == "--browser-trust-fingerprint" || arg == "--browser-trust-store"
             || arg == "--publish" || arg == "--name" || arg == "--public-host")
         {
             std::cerr << arg << " requires a value\n";

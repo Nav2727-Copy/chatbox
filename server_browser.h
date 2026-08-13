@@ -7,6 +7,8 @@ license: CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 #include "common.h"
 #include "protocol.h"
+#include "tls.h"
+#include "transport.h"
 #include "utils.h"
 struct BrowserEntry
 {
@@ -14,6 +16,7 @@ struct BrowserEntry
     std::string host;
     uint16_t port = 0;
     bool has_password = false;
+    bool uses_tls = true;
     int users = 0;
     std::chrono::system_clock::time_point updated_at;
 };
@@ -23,9 +26,16 @@ bool parse_u16_field(const std::string& text, uint16_t& out);
 class ServerBrowser
 {
 public:
-    ServerBrowser(boost::asio::io_context& io, uint16_t port)
-        : io_(io), acceptor_(io)
+    ServerBrowser(boost::asio::io_context& io, uint16_t port,
+        chatbox::tls::ServerConfig tls_config = {})
+        : io_(io), acceptor_(io), tls_config_(std::move(tls_config))
     {
+        if (tls_config_.enabled)
+        {
+            tls_context_ = std::make_unique<boost::asio::ssl::context>(
+                boost::asio::ssl::context::tls_server);
+            chatbox::tls::configure_server_context(*tls_context_, tls_config_);
+        }
         tcp::endpoint endpoint(tcp::v6(), port);
         acceptor_.open(endpoint.protocol());
         acceptor_.set_option(boost::asio::ip::v6_only(false));
@@ -44,6 +54,8 @@ public:
                 acceptor_.close(ignored);
             });
     }
+
+    uint16_t port() const { return acceptor_.local_endpoint().port(); }
 
     std::vector<BrowserEntry> entries() const
     {
@@ -66,8 +78,8 @@ public:
 
         if (parts[0] == "REGISTER")
         {
-            if (parts.size() < 6)
-                return { "ERROR|REGISTER requires name, host, port, password flag, users" };
+            if (parts.size() < 7)
+                return { "ERROR|REGISTER requires name, host, port, password flag, users, and TLS flag" };
 
             BrowserEntry entry;
             entry.name = sanitize_browser_field(parts[1], BROWSER_NAME_MAX_LEN);
@@ -87,6 +99,7 @@ public:
             {
                 entry.users = 0;
             }
+            entry.uses_tls = parts[6] == "1";
             entry.updated_at = std::chrono::system_clock::now();
 
             {
@@ -131,6 +144,7 @@ public:
                         + "|" + std::to_string(entry.port)
                         + "|" + (entry.has_password ? "1" : "0")
                         + "|" + std::to_string(entry.users)
+                        + "|" + (entry.uses_tls ? "1" : "0")
                         + "|" + std::to_string(age));
                 }
             }
@@ -145,14 +159,32 @@ private:
     class Session : public std::enable_shared_from_this<Session>
     {
     public:
-        Session(tcp::socket socket, ServerBrowser& browser)
-            : socket_(std::move(socket)), browser_(browser), buffer_(MAX_WIRE_LINE_LENGTH)
+        Session(tcp::socket socket, ServerBrowser& browser,
+            boost::asio::ssl::context* tls_context)
+            : stream_(std::move(socket), tls_context), browser_(browser),
+            buffer_(MAX_WIRE_LINE_LENGTH)
         {}
 
         void start()
         {
             auto self = shared_from_this();
-            boost::asio::async_read_until(socket_, buffer_, '\n',
+            stream_.async_server_handshake(
+                [this, self](boost::system::error_code ec)
+                {
+                    if (ec)
+                    {
+                        stream_.close();
+                        return;
+                    }
+                    read_request();
+                });
+        }
+
+    private:
+        void read_request()
+        {
+            auto self = shared_from_this();
+            stream_.async_read_until(buffer_, '\n',
                 [this, self](boost::system::error_code ec, std::size_t)
                 {
                     if (ec)
@@ -177,18 +209,15 @@ private:
                             write_payload_ += *encoded.value;
                     }
 
-                    boost::asio::async_write(socket_, boost::asio::buffer(write_payload_),
+                    stream_.async_write(boost::asio::buffer(write_payload_),
                         [this, self](boost::system::error_code, std::size_t)
                         {
-                            boost::system::error_code ignored;
-                            socket_.shutdown(tcp::socket::shutdown_both, ignored);
-                            socket_.close(ignored);
+                            stream_.close();
                         });
                 });
         }
 
-    private:
-        tcp::socket socket_;
+        TransportStream stream_;
         ServerBrowser& browser_;
         boost::asio::streambuf buffer_;
         std::string write_payload_;
@@ -200,7 +229,8 @@ private:
             [this](boost::system::error_code ec, tcp::socket socket)
             {
                 if (!ec)
-                    std::make_shared<Session>(std::move(socket), *this)->start();
+                    std::make_shared<Session>(std::move(socket), *this,
+                        tls_context_.get())->start();
 
                 if (acceptor_.is_open())
                     accept_loop();
@@ -221,6 +251,8 @@ private:
 
     boost::asio::io_context& io_;
     tcp::acceptor acceptor_;
+    chatbox::tls::ServerConfig tls_config_;
+    std::unique_ptr<boost::asio::ssl::context> tls_context_;
     mutable std::mutex entries_mutex_;
     mutable std::map<std::string, BrowserEntry> entries_;
 };
@@ -232,16 +264,19 @@ public:
         const std::string& browser_host,
         uint16_t browser_port,
         const BrowserEntry& entry,
-        std::string& error)
+        std::string& error,
+        const chatbox::tls::ClientConfig& tls_config = {})
     {
         std::string request = "REGISTER|" + sanitize_browser_field(entry.name, BROWSER_NAME_MAX_LEN)
             + "|" + sanitize_browser_field(entry.host, HOST_MAX_LEN)
             + "|" + std::to_string(entry.port)
             + "|" + (entry.has_password ? "1" : "0")
-            + "|" + std::to_string(std::max(0, entry.users));
+            + "|" + std::to_string(std::max(0, entry.users))
+            + "|" + (entry.uses_tls ? "1" : "0");
 
         std::vector<std::string> response;
-        if (!send_request(browser_host, browser_port, request, response, error))
+        if (!send_request(browser_host, browser_port, request, response, error,
+            tls_config))
             return false;
 
         if (!response.empty() && response[0] == "OK")
@@ -254,24 +289,28 @@ public:
     static bool unregister_server(
         const std::string& browser_host,
         uint16_t browser_port,
-        const BrowserEntry& entry)
+        const BrowserEntry& entry,
+        const chatbox::tls::ClientConfig& tls_config = {})
     {
         std::string ignored;
         std::vector<std::string> response;
         std::string request = "UNREGISTER|" + sanitize_browser_field(entry.host, HOST_MAX_LEN)
             + "|" + std::to_string(entry.port)
             + "|" + sanitize_browser_field(entry.name, BROWSER_NAME_MAX_LEN);
-        return send_request(browser_host, browser_port, request, response, ignored);
+        return send_request(browser_host, browser_port, request, response, ignored,
+            tls_config);
     }
 
     static bool list_servers(
         const std::string& browser_host,
         uint16_t browser_port,
         std::vector<BrowserEntry>& entries,
-        std::string& error)
+        std::string& error,
+        const chatbox::tls::ClientConfig& tls_config = {})
     {
         std::vector<std::string> response;
-        if (!send_request(browser_host, browser_port, "LIST", response, error))
+        if (!send_request(browser_host, browser_port, "LIST", response, error,
+            tls_config))
             return false;
 
         entries.clear();
@@ -281,7 +320,7 @@ public:
                 return true;
 
             auto parts = split(line, '|');
-            if (parts.size() < 7 || parts[0] != "SERVER")
+            if (parts.size() < 8 || parts[0] != "SERVER")
                 continue;
 
             BrowserEntry entry;
@@ -292,9 +331,10 @@ public:
             entry.has_password = parts[4] == "1";
             try { entry.users = std::max(0, std::stoi(parts[5])); }
             catch (...) { entry.users = 0; }
+            entry.uses_tls = parts[6] == "1";
             try
             {
-                int age = std::max(0, std::stoi(parts[6]));
+                int age = std::max(0, std::stoi(parts[7]));
                 entry.updated_at = std::chrono::system_clock::now() - std::chrono::seconds(age);
             }
             catch (...)
@@ -314,13 +354,18 @@ private:
         uint16_t browser_port,
         const std::string& request,
         std::vector<std::string>& response,
-        std::string& error)
+        std::string& error,
+        const chatbox::tls::ClientConfig& tls_config)
     {
         try
         {
             boost::asio::io_context io;
             tcp::resolver resolver(io);
-            tcp::socket socket(io);
+            boost::asio::ssl::context tls_context(
+                boost::asio::ssl::context::tls_client);
+            chatbox::tls::configure_client_context(tls_context, tls_config);
+            TransportStream stream(io,
+                tls_config.enabled ? &tls_context : nullptr);
             boost::system::error_code ec;
             auto endpoints = resolver.resolve(browser_host, std::to_string(browser_port), ec);
             if (ec)
@@ -330,8 +375,25 @@ private:
                 return false;
             }
 
-            if (!connect_with_timeout(io, socket, endpoints, browser_host, browser_port, error))
+            if (!connect_with_timeout(io, stream.lowest_layer(), endpoints,
+                browser_host, browser_port, error))
                 return false;
+
+            if (tls_config.enabled)
+            {
+                chatbox::tls::set_server_name(stream.native_tls_handle(), browser_host);
+                stream.client_handshake(ec);
+                if (ec)
+                {
+                    error = browser_connection_error(browser_host, browser_port,
+                        "TLS handshake failed: " + ec.message());
+                    return false;
+                }
+                std::string notice;
+                if (!chatbox::tls::verify_peer(stream.native_tls_handle(),
+                    browser_host, browser_port, tls_config, notice, error))
+                    return false;
+            }
 
             auto payload = chatbox::protocol::encode_frame(request);
             if (!payload)
@@ -339,7 +401,7 @@ private:
                 error = "Could not encode browser request: " + payload.detail;
                 return false;
             }
-            boost::asio::write(socket, boost::asio::buffer(*payload.value), ec);
+            stream.write(boost::asio::buffer(*payload.value), ec);
             if (ec)
             {
                 error = browser_connection_error(browser_host, browser_port,
@@ -350,7 +412,7 @@ private:
             boost::asio::streambuf buffer(MAX_WIRE_LINE_LENGTH);
             while (true)
             {
-                boost::asio::read_until(socket, buffer, '\n', ec);
+                stream.read_until(buffer, '\n', ec);
                 if (ec)
                     break;
 
@@ -444,11 +506,13 @@ public:
         std::string browser_host,
         uint16_t browser_port,
         BrowserEntry entry,
-        std::function<int()> users_provider)
+        std::function<int()> users_provider,
+        chatbox::tls::ClientConfig tls_config = {})
         : browser_host_(std::move(browser_host)),
         browser_port_(browser_port),
         entry_(std::move(entry)),
-        users_provider_(std::move(users_provider))
+        users_provider_(std::move(users_provider)),
+        tls_config_(std::move(tls_config))
     {}
 
     ~ServerBrowserPublisher()
@@ -462,7 +526,8 @@ public:
             return true;
 
         entry_.users = current_users();
-        if (!ServerBrowserClient::register_server(browser_host_, browser_port_, entry_, error))
+        if (!ServerBrowserClient::register_server(browser_host_, browser_port_,
+            entry_, error, tls_config_))
             return false;
 
         started_ = true;
@@ -480,7 +545,8 @@ public:
         if (worker_.joinable())
             worker_.join();
 
-        ServerBrowserClient::unregister_server(browser_host_, browser_port_, entry_);
+        ServerBrowserClient::unregister_server(browser_host_, browser_port_, entry_,
+            tls_config_);
         started_ = false;
     }
 
@@ -503,7 +569,8 @@ private:
             BrowserEntry entry = entry_;
             entry.users = current_users();
             std::string ignored;
-            ServerBrowserClient::register_server(browser_host_, browser_port_, entry, ignored);
+            ServerBrowserClient::register_server(browser_host_, browser_port_, entry,
+                ignored, tls_config_);
         }
     }
 
@@ -511,6 +578,7 @@ private:
     uint16_t browser_port_ = BROWSER_PORT;
     BrowserEntry entry_;
     std::function<int()> users_provider_;
+    chatbox::tls::ClientConfig tls_config_;
     std::atomic<bool> stop_requested_{ false };
     bool started_ = false;
     std::thread worker_;

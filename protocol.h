@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -9,9 +10,14 @@
 
 namespace chatbox::protocol
 {
-inline constexpr unsigned VERSION = 2;
+inline constexpr unsigned VERSION = 3;
 inline constexpr std::size_t MAX_FRAME_LENGTH = 4096;
 inline constexpr std::size_t MAX_CHAT_LENGTH = 1000;
+inline constexpr std::size_t MAX_ROOM_NAME_LENGTH = 32;
+inline constexpr std::size_t MAX_ROOM_TOPIC_LENGTH = 200;
+inline constexpr std::size_t MAX_ROOMS = 32;
+
+using RoomId = std::uint64_t;
 
 enum class Error
 {
@@ -59,6 +65,25 @@ struct IdentityProof
 
 struct Leave {};
 
+struct Disconnect {};
+
+struct ListRooms {};
+
+struct CreateRoom
+{
+    std::string name;
+};
+
+struct JoinRoom
+{
+    std::string name;
+};
+
+struct TopicRequest
+{
+    std::optional<std::string> topic;
+};
+
 struct Chat
 {
     std::string body;
@@ -70,14 +95,26 @@ struct Whisper
     std::string body;
 };
 
+struct KickRequest
+{
+    std::string nickname;
+    std::string reason;
+};
+
 using ClientMessage = std::variant<
     Hello,
     Authenticate,
     Identify,
     IdentityProof,
     Leave,
+    Disconnect,
+    ListRooms,
+    CreateRoom,
+    JoinRoom,
+    TopicRequest,
     Chat,
-    Whisper>;
+    Whisper,
+    KickRequest>;
 
 struct AuthRequired {};
 struct AuthAccepted {};
@@ -110,7 +147,39 @@ struct Kick
 
 struct UserList
 {
+    RoomId room_id = 0;
     std::vector<std::string> nicknames;
+};
+
+struct RoomSummary
+{
+    RoomId id = 0;
+    std::string name;
+    std::size_t user_count = 0;
+};
+
+struct RoomList
+{
+    std::vector<RoomSummary> rooms;
+};
+
+struct RoomJoined
+{
+    RoomId id = 0;
+    std::string name;
+    std::string topic;
+};
+
+struct RoomTopic
+{
+    RoomId room_id = 0;
+    std::string topic;
+};
+
+struct RoomText
+{
+    RoomId room_id = 0;
+    std::string body;
 };
 
 struct Text
@@ -136,8 +205,15 @@ using ServerMessage = std::variant<
     JoinRejected,
     Kick,
     UserList,
+    RoomList,
+    RoomJoined,
+    RoomTopic,
+    RoomText,
     Text,
     ServerError>;
+
+bool is_valid_room_name(std::string_view name);
+bool is_valid_room_topic(std::string_view topic);
 
 std::string_view error_name(Error error);
 

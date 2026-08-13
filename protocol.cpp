@@ -74,6 +74,28 @@ bool is_valid_text(std::string_view text, std::size_t max_length)
         });
 }
 
+bool parse_unsigned(std::string_view text, std::uint64_t& value)
+{
+    value = 0;
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    return !text.empty() && parsed.ec == std::errc{} &&
+        parsed.ptr == text.data() + text.size();
+}
+
+std::string rest_after_delimiter(std::string_view payload, std::size_t delimiter_number)
+{
+    std::size_t position = 0;
+    for (std::size_t i = 0; i < delimiter_number; ++i)
+    {
+        position = payload.find('|', position);
+        if (position == std::string_view::npos)
+            return {};
+        ++position;
+    }
+    return std::string(payload.substr(position));
+}
+
 bool is_hex(std::string_view text, std::size_t length)
 {
     return text.size() == length &&
@@ -127,6 +149,28 @@ std::string_view error_name(Error error)
     case Error::UnsupportedVersion: return "unsupported version";
     }
     return "unknown error";
+}
+
+bool is_valid_room_name(std::string_view name)
+{
+    if (name.empty() || name.size() > MAX_ROOM_NAME_LENGTH)
+        return false;
+
+    return std::all_of(name.begin(), name.end(), [](unsigned char ch)
+        {
+            return std::isalnum(ch) != 0 || ch == '-' || ch == '_';
+        });
+}
+
+bool is_valid_room_topic(std::string_view topic)
+{
+    if (topic.size() > MAX_ROOM_TOPIC_LENGTH)
+        return false;
+
+    return std::none_of(topic.begin(), topic.end(), [](unsigned char ch)
+        {
+            return std::iscntrl(ch) != 0;
+        });
 }
 
 Result<std::string> encode_frame(std::string_view payload)
@@ -232,9 +276,19 @@ std::string serialize(const ClientMessage& message)
         },
         [](const IdentityProof& value) { return "PROOF|" + value.signature_hex; },
         [](const Leave&) { return std::string("LEAVE"); },
+        [](const Disconnect&) { return std::string("DISCONNECT"); },
+        [](const ListRooms&) { return std::string("ROOMS"); },
+        [](const CreateRoom& value) { return "CREATE|" + value.name; },
+        [](const JoinRoom& value) { return "JOIN|" + value.name; },
+        [](const TopicRequest& value) {
+            return value.topic ? "TOPIC|" + *value.topic : std::string("TOPIC");
+        },
         [](const Chat& value) { return "MSG|" + value.body; },
         [](const Whisper& value) {
             return "WHISPER|" + value.target + "|" + value.body;
+        },
+        [](const KickRequest& value) {
+            return "KICK|" + value.nickname + "|" + value.reason;
         }
         }, message);
 }
@@ -256,13 +310,34 @@ std::string serialize(const ServerMessage& message)
             return "KICK|" + value.nickname + "|" + value.reason;
         },
         [](const UserList& value) {
-            std::string output = "USERS|";
+            std::string output = "USERS|" + std::to_string(value.room_id) + "|";
             for (std::size_t i = 0; i < value.nicknames.size(); ++i)
             {
                 if (i != 0) output += ',';
                 output += value.nicknames[i];
             }
             return output;
+        },
+        [](const RoomList& value) {
+            std::string output = "ROOMS|";
+            for (std::size_t i = 0; i < value.rooms.size(); ++i)
+            {
+                if (i != 0) output += ';';
+                output += std::to_string(value.rooms[i].id) + ","
+                    + value.rooms[i].name + ","
+                    + std::to_string(value.rooms[i].user_count);
+            }
+            return output;
+        },
+        [](const RoomJoined& value) {
+            return "ROOM|" + std::to_string(value.id) + "|"
+                + value.name + "|" + value.topic;
+        },
+        [](const RoomTopic& value) {
+            return "TOPIC|" + std::to_string(value.room_id) + "|" + value.topic;
+        },
+        [](const RoomText& value) {
+            return "ROOM_TEXT|" + std::to_string(value.room_id) + "|" + value.body;
         },
         [](const Text& value) { return "TEXT|" + value.body; },
         [](const ServerError& value) { return "ERROR|" + value.reason; }
@@ -333,6 +408,40 @@ Result<ClientMessage> parse_client_message(std::string_view payload)
         return success(ClientMessage{ Leave{} });
     }
 
+    if (command == "DISCONNECT" || command == "ROOMS")
+    {
+        if (fields.size() != 1)
+            return failure<ClientMessage>(Error::WrongFieldCount,
+                std::string(command) + " does not accept fields");
+        if (command == "DISCONNECT")
+            return success(ClientMessage{ Disconnect{} });
+        return success(ClientMessage{ ListRooms{} });
+    }
+
+    if (command == "CREATE" || command == "JOIN")
+    {
+        if (fields.size() != 2)
+            return failure<ClientMessage>(Error::WrongFieldCount,
+                std::string(command) + " requires one room name");
+        if (!is_valid_room_name(fields[1]))
+            return failure<ClientMessage>(Error::InvalidField,
+                std::string(command) + " contains an invalid room name");
+        if (command == "CREATE")
+            return success(ClientMessage{ CreateRoom{ std::string(fields[1]) } });
+        return success(ClientMessage{ JoinRoom{ std::string(fields[1]) } });
+    }
+
+    if (command == "TOPIC")
+    {
+        if (fields.size() == 1)
+            return success(ClientMessage{ TopicRequest{ std::nullopt } });
+        std::string topic = rest_after_command(payload);
+        if (topic.empty() || !is_valid_room_topic(topic))
+            return failure<ClientMessage>(Error::InvalidField,
+                "TOPIC text is empty, oversized, or contains control characters");
+        return success(ClientMessage{ TopicRequest{ std::move(topic) } });
+    }
+
     if (command == "MSG")
     {
         if (fields.size() < 2)
@@ -352,6 +461,23 @@ Result<ClientMessage> parse_client_message(std::string_view payload)
         if (!is_valid_nickname(fields[1]) || !is_valid_text(body, MAX_CHAT_LENGTH))
             return failure<ClientMessage>(Error::InvalidField, "WHISPER contains an invalid target or body");
         return success(ClientMessage{ Whisper{ std::string(fields[1]), std::move(body) } });
+    }
+
+    if (command == "KICK")
+    {
+        if (fields.size() < 2 || !is_valid_nickname(fields[1]))
+            return failure<ClientMessage>(Error::InvalidField,
+                "KICK requires a valid nickname");
+        std::string reason;
+        if (fields.size() > 2)
+        {
+            reason = rest_after_delimiter(payload, 2);
+            if (!reason.empty() && !is_valid_text(reason, MAX_CHAT_LENGTH))
+                return failure<ClientMessage>(Error::InvalidField,
+                    "KICK reason is oversized or contains control characters");
+        }
+        return success(ClientMessage{
+            KickRequest{ std::string(fields[1]), std::move(reason) } });
     }
 
     return failure<ClientMessage>(Error::UnknownMessage,
@@ -410,16 +536,20 @@ Result<ServerMessage> parse_server_message(std::string_view payload)
 
     if (command == "USERS")
     {
-        if (fields.size() != 2)
-            return failure<ServerMessage>(Error::WrongFieldCount, "USERS requires one list field");
-        if (!fields[1].empty() && fields[1].back() == ',')
+        if (fields.size() != 3)
+            return failure<ServerMessage>(Error::WrongFieldCount, "USERS requires room and list fields");
+        std::uint64_t room_id = 0;
+        if (!parse_unsigned(fields[1], room_id) || room_id == 0)
+            return failure<ServerMessage>(Error::InvalidField, "USERS contains an invalid room ID");
+        if (!fields[2].empty() && fields[2].back() == ',')
             return failure<ServerMessage>(Error::InvalidField, "USERS contains an empty nickname");
         UserList users;
+        users.room_id = room_id;
         std::size_t start = 0;
-        while (start < fields[1].size())
+        while (start < fields[2].size())
         {
-            const std::size_t comma = fields[1].find(',', start);
-            const std::string_view nickname = fields[1].substr(
+            const std::size_t comma = fields[2].find(',', start);
+            const std::string_view nickname = fields[2].substr(
                 start, comma == std::string_view::npos ? comma : comma - start);
             if (!is_valid_nickname(nickname))
                 return failure<ServerMessage>(Error::InvalidField, "USERS contains an invalid nickname");
@@ -428,6 +558,86 @@ Result<ServerMessage> parse_server_message(std::string_view payload)
             start = comma + 1;
         }
         return success(ServerMessage{ std::move(users) });
+    }
+
+    if (command == "ROOMS")
+    {
+        if (fields.size() != 2)
+            return failure<ServerMessage>(Error::WrongFieldCount, "ROOMS requires one list field");
+        RoomList list;
+        std::size_t start = 0;
+        while (start < fields[1].size())
+        {
+            const std::size_t semicolon = fields[1].find(';', start);
+            const std::string_view entry = fields[1].substr(
+                start, semicolon == std::string_view::npos ? semicolon : semicolon - start);
+            const std::size_t first_comma = entry.find(',');
+            const std::size_t second_comma = first_comma == std::string_view::npos
+                ? std::string_view::npos : entry.find(',', first_comma + 1);
+            if (first_comma == std::string_view::npos || second_comma == std::string_view::npos)
+                return failure<ServerMessage>(Error::InvalidField, "ROOMS contains a malformed entry");
+
+            std::uint64_t id = 0;
+            std::uint64_t count = 0;
+            const std::string_view name = entry.substr(
+                first_comma + 1, second_comma - first_comma - 1);
+            if (!parse_unsigned(entry.substr(0, first_comma), id) || id == 0 ||
+                !is_valid_room_name(name) ||
+                !parse_unsigned(entry.substr(second_comma + 1), count))
+            {
+                return failure<ServerMessage>(Error::InvalidField, "ROOMS contains invalid room data");
+            }
+            list.rooms.push_back(RoomSummary{
+                id, std::string(name), static_cast<std::size_t>(count) });
+            if (list.rooms.size() > MAX_ROOMS)
+                return failure<ServerMessage>(Error::InvalidField, "ROOMS contains too many rooms");
+            if (semicolon == std::string_view::npos) break;
+            start = semicolon + 1;
+        }
+        return success(ServerMessage{ std::move(list) });
+    }
+
+    if (command == "ROOM")
+    {
+        if (fields.size() < 4)
+            return failure<ServerMessage>(Error::WrongFieldCount,
+                "ROOM requires ID, name, and topic fields");
+        std::uint64_t id = 0;
+        std::string topic = rest_after_delimiter(payload, 3);
+        if (!parse_unsigned(fields[1], id) || id == 0 ||
+            !is_valid_room_name(fields[2]) || !is_valid_room_topic(topic))
+        {
+            return failure<ServerMessage>(Error::InvalidField, "ROOM contains invalid room data");
+        }
+        return success(ServerMessage{
+            RoomJoined{ id, std::string(fields[2]), std::move(topic) } });
+    }
+
+    if (command == "TOPIC")
+    {
+        if (fields.size() < 3)
+            return failure<ServerMessage>(Error::WrongFieldCount,
+                "TOPIC requires room and topic fields");
+        std::uint64_t id = 0;
+        std::string topic = rest_after_delimiter(payload, 2);
+        if (!parse_unsigned(fields[1], id) || id == 0 || !is_valid_room_topic(topic))
+            return failure<ServerMessage>(Error::InvalidField, "TOPIC contains invalid room data");
+        return success(ServerMessage{ RoomTopic{ id, std::move(topic) } });
+    }
+
+    if (command == "ROOM_TEXT")
+    {
+        if (fields.size() < 3)
+            return failure<ServerMessage>(Error::WrongFieldCount,
+                "ROOM_TEXT requires room and text fields");
+        std::uint64_t id = 0;
+        std::string body = rest_after_delimiter(payload, 2);
+        if (!parse_unsigned(fields[1], id) || id == 0 ||
+            !is_valid_text(body, MAX_FRAME_LENGTH))
+        {
+            return failure<ServerMessage>(Error::InvalidField, "ROOM_TEXT contains invalid room data");
+        }
+        return success(ServerMessage{ RoomText{ id, std::move(body) } });
     }
 
     if (command == "KICK")

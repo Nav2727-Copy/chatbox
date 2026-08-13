@@ -32,10 +32,9 @@ bool extract_whisper(const std::string& input, std::string& target, std::string&
 
 void show_host_command_help()
 {
-    push_message("[system] /kick <nick> [reason] - Kick a user (host only)");
-    push_message("[system] /ban  <nick> [reason] - Ban  a user (host only)");
+    push_message("[system] /ban  <nick> [reason] - Ban a user server-wide (host only)");
     push_message("[system] /unban <nick>         - Unban a user (host only)");
-    push_message("[system] /bans                 - List banned users");
+    push_message("[system] /bans                 - List server-wide bans");
 }
 }
 
@@ -51,7 +50,7 @@ std::optional<Command> parse_command(const std::string& input)
     Command cmd;
     cmd.name = parts[0];
     for (size_t i = 1; i < parts.size(); ++i)
-        cmd.args.push_back(parts[i]);
+        if (!parts[i].empty()) cmd.args.push_back(parts[i]);
 
     return cmd;
 }
@@ -60,10 +59,16 @@ void show_command_help()
 {
     push_message("[system] === Available Commands ===");
     push_message("[system] /help                    - Show this help message");
-    push_message("[system] /users                   - List all connected users");
+    push_message("[system] /rooms                   - List available rooms");
+    push_message("[system] /create <name>           - Create and enter a room");
+    push_message("[system] /join <name>             - Switch to a room");
+    push_message("[system] /leave                   - Return to the lobby");
+    push_message("[system] /topic [text]            - View or set the room topic");
+    push_message("[system] /users                   - List users in this room");
     push_message("[system] /clear                   - Clear message history");
     push_message("[system] /time                    - Show current time");
-    push_message("[system] /whisper <nick> <msg>    - Send private message");
+    push_message("[system] /whisper <nick> <msg>    - Whisper within this room");
+    push_message("[system] /kick <nick> [reason]    - Kick a room member (room creator/host)");
     push_message("[system] /exit                    - Exit the application");
     push_message("[system] === End Help ===");
 }
@@ -97,9 +102,97 @@ ChatInputResult handle_chat_input(const std::string& input, const ChatInputConte
     }
     else if (cmd->name == "users")
     {
-        push_message("[system] Connected users:");
-        for (const auto& user : connected_users())
+        push_message("[system] Users in #" + active_room_name() + ":");
+        for (const auto& user : user_snapshot())
             push_message("[system]   - " + user);
+    }
+    else if (cmd->name == "rooms")
+    {
+        if (context.server)
+            context.server->show_room_list_local();
+        else if (context.client)
+            context.client->request_rooms();
+    }
+    else if (cmd->name == "create")
+    {
+        if (cmd->args.size() != 1)
+        {
+            push_message("[system] Usage: /create <name>");
+        }
+        else if (context.server)
+        {
+            std::string error;
+            if (!context.server->create_local_room(cmd->args[0], error))
+                push_message("[system] " + error);
+        }
+        else if (context.client)
+        {
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::CreateRoom{ cmd->args[0] } });
+        }
+    }
+    else if (cmd->name == "join")
+    {
+        if (cmd->args.size() != 1)
+        {
+            push_message("[system] Usage: /join <name>");
+        }
+        else if (context.server)
+        {
+            std::string error;
+            if (!context.server->join_local_room(cmd->args[0], error))
+                push_message("[system] " + error);
+        }
+        else if (context.client)
+        {
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::JoinRoom{ cmd->args[0] } });
+        }
+    }
+    else if (cmd->name == "leave")
+    {
+        if (!cmd->args.empty())
+        {
+            push_message("[system] Usage: /leave");
+        }
+        else if (context.server)
+        {
+            std::string error;
+            if (!context.server->leave_local_room(error))
+                push_message("[system] " + error);
+        }
+        else if (context.client)
+        {
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::Leave{} });
+        }
+    }
+    else if (cmd->name == "topic")
+    {
+        if (cmd->args.empty())
+        {
+            if (context.server)
+                push_message("[system] Topic: "
+                    + (active_room_topic().empty() ? "(none)" : active_room_topic()));
+            else if (context.client)
+                context.client->send(chatbox::protocol::ClientMessage{
+                    chatbox::protocol::TopicRequest{ std::nullopt } });
+        }
+        else
+        {
+            const std::string topic = join_fields(cmd->args, 0, ' ');
+            if (context.server)
+            {
+                std::string error;
+                if (!context.server->set_local_topic(topic, error))
+                    push_message("[system] " + error);
+            }
+            else if (context.client)
+            {
+                context.client->send(chatbox::protocol::ClientMessage{
+                    chatbox::protocol::TopicRequest{ topic } });
+            }
+        }
     }
     else if (cmd->name == "clear")
     {
@@ -131,16 +224,29 @@ ChatInputResult handle_chat_input(const std::string& input, const ChatInputConte
                 chatbox::protocol::Whisper{ target, message } });
         }
     }
-    else if (cmd->name == "kick" && context.server && context.host_commands_enabled && cmd->args.size() >= 1)
+    else if (cmd->name == "kick" && cmd->args.size() >= 1)
     {
         const std::string nick = cmd->args[0];
         const std::string reason = join_fields(cmd->args, 1, ' ');
-        if (!context.server->kick_user(nick, reason))
-            push_message("[system] User '" + nick + "' not found");
+        if (context.server && context.host_commands_enabled)
+        {
+            if (!context.server->kick_user(nick, reason))
+                push_message("[system] User '" + nick + "' is not in this room");
+        }
+        else if (context.client)
+        {
+            context.client->send(chatbox::protocol::ClientMessage{
+                chatbox::protocol::KickRequest{ nick, reason } });
+        }
+    }
+    else if (cmd->name == "kick")
+    {
+        push_message("[system] Usage: /kick <nick> [reason]");
     }
     else if (cmd->name == "ban" && context.server && context.host_commands_enabled && cmd->args.size() >= 1)
     {
         context.server->ban_user(cmd->args[0], join_fields(cmd->args, 1, ' '));
+        push_message("[system] " + cmd->args[0] + " has been banned server-wide");
     }
     else if (cmd->name == "unban" && context.server && context.host_commands_enabled && cmd->args.size() >= 1)
     {
