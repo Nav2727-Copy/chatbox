@@ -56,35 +56,63 @@ std::string random_hex(size_t bytes)
     return bytes_to_hex(data.data(), data.size());
 }
 
-
-std::string identity_file_for_nickname(const std::string& nick)
+std::string chatbox_data_directory()
 {
     namespace fs = std::filesystem;
     const char* base = nullptr;
 #ifdef _WIN32
     base = std::getenv("APPDATA");
-    if (!base || !*base)
-    {
-        const char* profile = std::getenv("USERPROFILE");
-        if (profile && *profile)
-            return (fs::path(profile) / "AppData" / "Roaming" / "chatbox" /
-                ("chatbox_identity_" + hex_from_text(nick) + ".key")).string();
-    }
     if (base && *base)
-        return (fs::path(base) / "chatbox" /
-            ("chatbox_identity_" + hex_from_text(nick) + ".key")).string();
+        return (fs::path(base) / "chatbox").string();
+    base = std::getenv("USERPROFILE");
+    if (base && *base)
+        return (fs::path(base) / "AppData" / "Roaming" / "chatbox").string();
 #else
     base = std::getenv("XDG_DATA_HOME");
     if (base && *base)
-        return (fs::path(base) / "chatbox" /
-            ("chatbox_identity_" + hex_from_text(nick) + ".key")).string();
+        return (fs::path(base) / "chatbox").string();
     base = std::getenv("HOME");
     if (base && *base)
-        return (fs::path(base) / ".local" / "share" / "chatbox" /
-            ("chatbox_identity_" + hex_from_text(nick) + ".key")).string();
+        return (fs::path(base) / ".local" / "share" / "chatbox").string();
 #endif
-    // Keep a usable fallback for unusual environments without a home directory.
-    return "chatbox_identity_" + hex_from_text(nick) + ".key";
+    return ".";
+}
+
+std::string chatbox_database_path()
+{
+    namespace fs = std::filesystem;
+    const fs::path directory(chatbox_data_directory());
+    const fs::path database = directory / "chatbox.db";
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+    if (ec)
+        return "chatbox.db";
+
+    // Move the former working-directory database on first use so existing
+    // local server data continues to be used after changing the default path.
+    if (!fs::exists(database, ec) && !ec && fs::exists("chatbox.db", ec) && !ec)
+    {
+        fs::rename("chatbox.db", database, ec);
+        if (!ec)
+        {
+            for (const char* suffix : {"-wal", "-shm"})
+            {
+                const fs::path old_sidecar = std::string("chatbox.db") + suffix;
+                if (fs::exists(old_sidecar, ec) && !ec)
+                    fs::rename(old_sidecar, database.string() + suffix, ec);
+                ec.clear();
+            }
+        }
+    }
+    return database.string();
+}
+
+
+std::string identity_file_for_nickname(const std::string& nick)
+{
+    namespace fs = std::filesystem;
+    return (fs::path(chatbox_data_directory()) /
+        ("chatbox_identity_" + hex_from_text(nick) + ".key")).string();
 }
 
 bool load_identity_file(const std::string& path, ClientIdentity& identity)

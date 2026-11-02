@@ -12,7 +12,7 @@ struct DedicatedServerConfig
     uint16_t port = 0;
     std::string password;
     std::string logfile = "chatlog.txt";
-    std::string database = "chatbox.db";
+    std::string database;
     std::string bans_file = "bans.txt";
     std::string identities_file = "identities.txt";
     std::string browser_host;

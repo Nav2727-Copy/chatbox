@@ -103,7 +103,7 @@ TLS is enabled by default. Supply a PEM certificate and private key:
   --tls-cert server-cert.pem --tls-key server-key.pem
 ```
 
-Set an optional password and database path:
+Set an optional password and database path. By default, Chatbox stores its SQLite database beside its identity keys in the per-user data directory (`$XDG_DATA_HOME/chatbox` on Linux/macOS, or `%APPDATA%\\chatbox` on Windows). On first use, an existing `chatbox.db` in the working directory is moved there. `--database` still accepts an explicit path.
 
 ```sh
 ./out/build/linux-debug/chatbox --server 7777 \

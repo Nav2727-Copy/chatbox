@@ -17,7 +17,7 @@ void show_dedicated_usage()
         << "Options:\n"
         << "  --password <password>  - set the server password\n"
         << "  --log <file>           - write logs to a file\n"
-        << "  --database <path>      - SQLite database (default chatbox.db)\n"
+        << "  --database <path>      - SQLite database (default: per-user Chatbox data folder)\n"
         << "  --history-limit <n>    - in-memory/join history size (1-500)\n"
         << "  --import-bans <file>   - one-time import from a legacy bans file\n"
         << "  --import-identities <file> - one-time import from a legacy identity file\n"
@@ -357,6 +357,8 @@ ConsoleExitReason admin_console(ChatServer& server, std::atomic<bool>& quit_flag
 
 int run_dedicated_server_config(const DedicatedServerConfig& config)
 {
+    const std::string database_path = config.database.empty()
+        ? chatbox_database_path() : config.database;
     if (config.tls.enabled &&
         (config.tls.certificate_path.empty() || config.tls.private_key_path.empty()))
     {
@@ -396,7 +398,7 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
     std::shared_ptr<chatbox::storage::SQLiteStorage> storage;
     try
     {
-        storage = std::make_shared<chatbox::storage::SQLiteStorage>(config.database);
+        storage = std::make_shared<chatbox::storage::SQLiteStorage>(database_path);
         const auto imported = storage->import_legacy_files(
             config.bans_file, config.identities_file);
         if (imported.bans || imported.identities)
@@ -515,7 +517,7 @@ int run_dedicated_server_config(const DedicatedServerConfig& config)
         std::cout << "stdout only";
     else
         std::cout << config.logfile;
-    std::cout << " | Database: " << config.database << "\n";
+    std::cout << " | Database: " << database_path << "\n";
     std::cout << "Transport: " << (config.tls.enabled ? "TLS" : "PLAINTEXT (explicit)")
         << "\n";
 

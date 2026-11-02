@@ -188,7 +188,7 @@ int run_curses_app()
                     }
 
                     auto host_storage = std::make_shared<chatbox::storage::SQLiteStorage>(
-                        "chatbox.db");
+                        chatbox_database_path());
                     host_storage->import_legacy_files("bans.txt", "identities.txt");
                     server = std::make_unique<ChatServer>(
                         io,

@@ -19,6 +19,8 @@ bool hex_to_bytes(const std::string& hex, unsigned char* out, size_t out_len);
 bool is_hex_of_len(const std::string& text, size_t bytes);
 std::string hex_from_text(const std::string& text);
 std::string random_hex(size_t bytes);
+std::string chatbox_data_directory();
+std::string chatbox_database_path();
 std::string identity_file_for_nickname(const std::string& nick);
 bool load_identity_file(const std::string& path, ClientIdentity& identity);
 bool save_identity_file(const std::string& path, const ClientIdentity& identity);
