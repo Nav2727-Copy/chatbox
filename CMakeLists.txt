@@ -108,8 +108,7 @@ target_link_libraries(chatbox_curses_frontend
   PUBLIC
     chatbox_core
     chatbox_terminal_model
-  PRIVATE
-    ${CHATBOX_CURSES_TARGET}
+    ${CHATBOX_CURSES_TARGET}  # Changed to PUBLIC so downstream binaries get the Curses layout
 )
 target_compile_features(chatbox_curses_frontend PUBLIC cxx_std_20)
 
