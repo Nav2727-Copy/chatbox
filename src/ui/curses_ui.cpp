@@ -11,11 +11,6 @@
 #include <cctype>
 #include <climits>
 #include <curses.h>
-#ifndef _WIN32
-#include <cstdlib>
-#include <cstdio>
-#include <stdexcept>
-#endif
 
 namespace
 {
@@ -301,17 +296,9 @@ void complete(ChatView& view)
 void initialize_curses_ui()
 {
     std::setlocale(LC_ALL, "");
-#ifndef _WIN32
-    // If the user's terminal type is missing from the local terminfo database,
-    // ncurses exits from initscr() before the application can handle the error.
-    // xterm is a widely available fallback and supports the capabilities we use.
-    const char* term = std::getenv("TERM");
-    if (!term || !*term || std::string_view(term) == "xterm-256color")
-    {
-        if (setenv("TERM", "xterm", 1) != 0)
-            throw std::runtime_error("Terminal type is unavailable and TERM could not be set.");
-    }
-#endif
+    // Keep the terminal type selected by the user's terminal emulator. Rewriting
+    // xterm-256color to xterm can fail on systems that have only the former's
+    // terminfo entry installed.
     initscr();
     initialized = true;
     cbreak(); noecho(); keypad(stdscr, TRUE);
