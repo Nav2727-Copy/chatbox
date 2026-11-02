@@ -16,20 +16,60 @@ Chatbox is a terminal-based chat application written in C++20. It includes an in
 - CMake 3.16 or newer
 - A C++20 compiler
 - [vcpkg](https://github.com/microsoft/vcpkg)
-- Ninja on Windows; CMake's Unix Makefiles generator is used on Linux and macOS
+- Ninja on Windows; Make on Linux and macOS
+- On Windows, a Visual Studio developer environment with the C++ workload
 
 Project dependencies are declared in `vcpkg.json`: Boost.Asio, miniupnpc, libsodium, OpenSSL, SQLite, and curses (PDCurses on Windows, ncurses elsewhere).
 
-## Build
+## Build by platform
 
-Set `VCPKG_ROOT` to your vcpkg checkout, then run the build script with the preset for your platform:
+Install CMake, the platform's C++ build tools, and vcpkg. Bootstrap vcpkg if needed, then set `VCPKG_ROOT` to its checkout (the scripts default to `$HOME/vcpkg` if present):
 
 ```sh
-export VCPKG_ROOT="$HOME/vcpkg"  # adjust if vcpkg is installed elsewhere
-./build.sh linux-debug
+export VCPKG_ROOT="$HOME/vcpkg" # adjust if vcpkg is installed elsewhere
 ```
 
-Available presets are `linux-debug`, `linux-release`, `macos-debug`, `x64-debug`, `x64-release`, `x86-debug`, and `x86-release`. Windows presets expect a Visual Studio developer environment. The script writes build output to `out/build/<preset>`.
+The scripts build natively for the selected architecture. vcpkg downloads and builds the dependencies on the first run, so the initial build can take a while.
+
+### Linux x64 and aarch64
+
+Install GCC, Make, CMake, and ncurses development headers (for example, `build-essential` and `libncurses-dev` on Debian/Ubuntu). Run on an x86_64 Linux machine for x64, or an aarch64 Linux machine for aarch64:
+
+```sh
+./build-linux.sh x64 debug
+./build-linux.sh x64 release
+./build-linux.sh aarch64 debug
+./build-linux.sh aarch64 release
+```
+
+### macOS ARM64 and native architecture
+
+Install Xcode Command Line Tools (`xcode-select --install`), CMake, and Make. On Apple Silicon, build ARM64 with:
+
+```sh
+./build-macos.sh arm64 debug
+```
+
+For a native build on either Apple Silicon or Intel macOS, use `./build-macos.sh native debug`. The current macOS script provides Debug presets.
+
+### Windows x64 and x86
+
+Install Visual Studio with the Desktop development with C++ workload, CMake, and Ninja. Open a Visual Studio Developer PowerShell, set `VCPKG_ROOT` if vcpkg is not in `$HOME\vcpkg`, then run:
+
+```powershell
+.\build-windows.ps1 x64 debug
+.\build-windows.ps1 x64 release
+.\build-windows.ps1 x86 debug
+.\build-windows.ps1 x86 release
+```
+
+### Cross-compiling
+
+These scripts and presets do not configure cross-compilation. In particular, the Linux aarch64 preset selects the ARM64 vcpkg triplet but also expects to run ARM64 GCC on an aarch64 Linux host. To build Linux aarch64 from x86_64 Linux, add and configure an aarch64 cross-compiler, target sysroot, and vcpkg cross-compilation triplet/chainload toolchain. The macOS ARM64 preset uses Apple's Clang and SDK and should be built on macOS; the current project does not provide a Linux-to-macOS toolchain. Windows builds also use Visual Studio's compiler and are intended to run from Windows.
+
+All scripts write build output to `out/build/<preset>`.
+
+For direct CMake use, run `cmake --preset <preset>` followed by `cmake --build out/build/<preset> --parallel`. Presets are `linux-debug`, `linux-release`, `linux-arm64-debug`, `linux-arm64-release`, `macos-debug`, `macos-arm64-debug`, `x64-debug`, `x64-release`, `x86-debug`, and `x86-release` (macOS and Windows presets are available only on those host systems).
 
 To build directly with CMake, configure with the desired preset and build its directory:
 
