@@ -106,4 +106,31 @@ inline constexpr char dedicated_server[] = "Dedicated server";
 inline constexpr char dedicated_description[] = "Set up a persistent home for your community.";
 inline constexpr char server_directory[] = "Server directory";
 inline constexpr char directory_description[] = "Publish and discover servers on port 2727.";
+
+// Join and hosting guidance
+inline constexpr char connection_dns_error[] = "Could not find that server address. Check the spelling and your internet connection, then try again.";
+inline constexpr char connection_timeout_error[] = "The server did not respond in time. Check the address and port, and make sure the host is online.";
+inline constexpr char connection_tls_error[] = "The secure connection could not be verified. Check that TLS is enabled only when the server supports it, and verify its certificate details.";
+inline constexpr char connection_refused_error[] = "The server refused the connection. Check the port and ask the host to confirm the server is running and reachable.";
+inline constexpr char connection_generic_error[] = "Could not connect. Check the server address, port, and TLS setting, then try again.";
+inline constexpr char join_error_next_step[] = "\n\nCheck the nickname, password, and server access, then try again.";
+inline constexpr char host_port_tcp[] = "Port (TCP)";
+inline constexpr char host_password_optional[] = "Password (optional)";
+inline constexpr char upnp_forwarding[] = "Automatic port forwarding (UPnP)";
+inline constexpr char host_tls_field[] = "Use TLS (encrypted; needs certificate and key)";
+inline constexpr char host_form_guidance[] = "Choose how people can join. Port uses TCP; UPnP may open it on your router. People joining need the password. TLS needs a certificate and private key.";
+inline constexpr char join_host_field[] = "Host address";
+inline constexpr char join_port_field[] = "Port";
+inline constexpr char join_tls_field[] = "Use TLS (must match the server)";
+inline constexpr char join_form_guidance[] = "Enter the address shared by your host. The default port is 7777.";
+inline constexpr char host_listening_prefix[] = "[hosting] Listening for chat connections on TCP port ";
+inline constexpr char host_tls_enabled_suffix[] = " with TLS encryption";
+inline constexpr char host_tls_disabled_suffix[] = " without TLS encryption";
+inline constexpr char upnp_host_mapping[] = "[hosting] UPnP port mapping succeeded. Chat connections use TCP port ";
+inline constexpr char upnp_share_address_suffix[] = ". Share the external address if available.";
+inline constexpr char host_manual_forward_prefix[] = "[hosting] Forward TCP port ";
+inline constexpr char host_manual_forward_suffix[] = " on your router to this computer for internet access";
+inline constexpr char host_local_only_prefix[] = "[hosting] This address may only work on your local network until TCP port ";
+inline constexpr char host_local_only_suffix[] = " is forwarded";
+inline constexpr char host_local_address_note[] = "[hosting] Local network address; people outside this network need a public address and router port forwarding.";
 }

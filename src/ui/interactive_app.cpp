@@ -18,6 +18,22 @@
 
 namespace
 {
+std::string explain_connection_error(const std::string& error)
+{
+    const auto contains = [&](const std::string& text) {
+        return error.find(text) != std::string::npos;
+    };
+    if (contains("resolve") || contains("host not found") || contains("Name or service not known"))
+        return chatbox::ui::ui_text::connection_dns_error;
+    if (contains("timed out") || contains("Timeout"))
+        return chatbox::ui::ui_text::connection_timeout_error;
+    if (contains("TLS") || contains("certificate") || contains("handshake"))
+        return chatbox::ui::ui_text::connection_tls_error;
+    if (contains("refused") || contains("Connection refused"))
+        return chatbox::ui::ui_text::connection_refused_error;
+    return chatbox::ui::ui_text::connection_generic_error;
+}
+
 // The caller keeps the network thread running throughout authentication and joining.
 std::optional<std::string> join_client_session(ChatClient& client,
     const std::string& nickname)
@@ -126,6 +142,13 @@ int run_curses_app()
     // =========================================
 
     bool configured = false;
+    std::string previous_host = "localhost";
+    std::string previous_port = "7777";
+    std::string previous_host_port = "7777";
+    std::string previous_join_tls = "yes";
+    std::string previous_password;
+    std::string previous_upnp = "yes";
+    std::string previous_host_tls = "yes";
 
     while (!configured)
     {
@@ -148,12 +171,19 @@ int run_curses_app()
             else if (ch == 'h' || ch == 'H')
             {
                 std::vector<CursesField> fields = {
-                    port_field(), { "Password (optional)", "", PASS_MAX_LEN, true },
-                    { "Automatic port forwarding (UPnP)", "yes", 3, false, true },
-                    { "Publish to a server directory", "no", 3, false, true },
-                    { "Use TLS", "yes", 3, false, true }
+                    { display::host_port_tcp, previous_host_port, 5, false, false, [](const std::string& value) {
+                        uint16_t port = 0;
+                        return parse_port(value, port) ? std::string{} : ui_text::invalid_port;
+                    } }, { display::host_password_optional, previous_password, PASS_MAX_LEN, true },
+                    { display::upnp_forwarding, previous_upnp, 3, false, true },
+                    { display::publish_directory, "no", 3, false, true },
+                    { display::host_tls_field, previous_host_tls, 3, false, true }
                 };
-                edit_curses_form("Host a conversation", "Choose how people can join your server.", fields);
+                edit_curses_form(display::host_conversation, display::host_form_guidance, fields);
+                previous_host_port = fields[0].value;
+                previous_password = fields[1].value;
+                previous_upnp = fields[2].value;
+                previous_host_tls = fields[4].value;
                 const auto& port_buf = fields[0].value;
                 const auto& room_password = fields[1].value;
                 const bool enable_upnp = fields[2].value == "yes";
@@ -207,6 +237,8 @@ int run_curses_app()
 
                     server->start_local_user();
                     push_message("[system] Hosting on port " + std::to_string(port));
+                    push_message(std::string(display::host_listening_prefix) + std::to_string(port)
+                        + (host_tls.enabled ? display::host_tls_enabled_suffix : display::host_tls_disabled_suffix));
                     push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
 
                     if (!room_password.empty())
@@ -225,6 +257,8 @@ int run_curses_app()
                             if (upnp->openPortBoth(std::to_string(port)))
                             {
                                 push_message("[system] UPnP OK - port " + std::to_string(port) + " opened on router");
+                                push_message(std::string(display::upnp_host_mapping) + std::to_string(port)
+                                    + display::upnp_share_address_suffix);
                                 if (!upnp->externalIP().empty())
                                 {
                                     push_message("[system] External address: " + upnp->externalIP() + ":" + std::to_string(port));
@@ -237,17 +271,20 @@ int run_curses_app()
                             {
                                 push_message("[system] UPnP mapping failed: " + upnp->lastError());
                                 push_message("[system] You may need to forward port " + std::to_string(port) + " manually");
+                                push_message(std::string(display::host_manual_forward_prefix) + std::to_string(port) + display::host_manual_forward_suffix);
                             }
                         }
                         else
                         {
                             push_message("[system] UPnP unavailable: " + upnp->lastError());
                             push_message("[system] Forward port " + std::to_string(port) + " manually for internet access");
+                            push_message(std::string(display::host_manual_forward_prefix) + std::to_string(port) + display::host_manual_forward_suffix);
                         }
                     }
                     else
                     {
                         push_message("[system] UPnP disabled; forward port " + std::to_string(port) + " manually for internet access");
+                        push_message(std::string(display::host_local_only_prefix) + std::to_string(port) + display::host_local_only_suffix);
                     }
 
                     // LAN addresses
@@ -262,6 +299,7 @@ int run_curses_app()
                             if (!addr.is_loopback())
                             {
                                 push_message("[system]   " + addr.to_string() + ":" + std::to_string(port));
+                                push_message(display::host_local_address_note);
                                 if (publish_host.empty())
                                     publish_host = addr.to_string();
                             }
@@ -327,7 +365,7 @@ int run_curses_app()
                 {
                     std::vector<CursesField> fields = {
                         required_field("Directory host", "", HOST_MAX_LEN),
-                        { "Use TLS", "yes", 3, false, true }
+                        { "Use TLS (match the directory server)", "yes", 3, false, true }
                     };
                     edit_curses_form("Discover servers", "Connect to a server directory to see who is online.", fields);
                     const auto& browser_host_buf = fields[0].value;
@@ -370,11 +408,17 @@ int run_curses_app()
                 else
                 {
                     std::vector<CursesField> fields = {
-                        required_field("Host address", "localhost", HOST_MAX_LEN),
-                        port_field(), { "Use TLS", "yes", 3, false, true }
+                        required_field(display::join_host_field, previous_host, HOST_MAX_LEN),
+                        { display::join_port_field, previous_port, 5, false, false, [](const std::string& value) {
+                            uint16_t port = 0;
+                            return parse_port(value, port) ? std::string{} : ui_text::invalid_port;
+                        } }, { display::join_tls_field, previous_join_tls, 3, false, true }
                     };
-                    edit_curses_form("Join a server", "Enter the address shared by your host.", fields);
+                    edit_curses_form(display::join_server, display::join_form_guidance, fields);
                     selected_host = fields[0].value;
+                    previous_host = fields[0].value;
+                    previous_port = fields[1].value;
+                    previous_join_tls = fields[2].value;
                     parse_port(fields[1].value, selected_port);
                     client_tls.enabled = fields[2].value == "yes";
                 }
@@ -387,7 +431,7 @@ int run_curses_app()
 
                     if (!client->connect(selected_host, selected_port))
                     {
-                        show_curses_notice("Connection failed", client->connect_error());
+                        show_curses_notice("Connection failed", explain_connection_error(client->connect_error()));
                         client.reset();
                         continue;
                     }
@@ -397,7 +441,7 @@ int run_curses_app()
 
                     if (auto error = join_client_session(*client, nickname))
                     {
-                        show_curses_notice("Could not join", *error);
+                        show_curses_notice("Could not join", *error + display::join_error_next_step);
                         close_client_session(*client, network_thread);
                         client.reset();
                         io.restart();
