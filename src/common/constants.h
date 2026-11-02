@@ -1,0 +1,30 @@
+#pragma once
+
+#include "protocol/protocol.h"
+
+constexpr int MAX_MESSAGES = 200;
+constexpr int SERVER_HISTORY_LIMIT = 100;
+constexpr int RATE_LIMIT_MESSAGES = 20;
+constexpr int RATE_LIMIT_WINDOW_SECONDS = 60;
+constexpr int MAX_WIRE_LINE_LENGTH =
+    static_cast<int>(chatbox::protocol::MAX_FRAME_LENGTH);
+constexpr int MAX_CHAT_MESSAGE_LEN =
+    static_cast<int>(chatbox::protocol::MAX_CHAT_LENGTH);
+constexpr int USERS_WINDOW_WIDTH = 24;
+constexpr int INPUT_WINDOW_HEIGHT = 3;
+constexpr int NICKNAME_BUF_SIZE = 32;
+constexpr int HOST_BUF_SIZE = 64;
+constexpr int PORT_BUF_SIZE = 16;
+constexpr int PASS_BUF_SIZE = 64;
+constexpr int LOGFILE_BUF_SIZE = 260;
+constexpr int NICK_MAX_LEN = 31;
+constexpr int HOST_MAX_LEN = 63;
+constexpr int PORT_MAX_LEN = 15;
+constexpr int PASS_MAX_LEN = 63;
+constexpr int LOGFILE_MAX_LEN = 259;
+constexpr int IDENTITY_CHALLENGE_BYTES = 32;
+constexpr int BROWSER_PORT = 2727;
+constexpr int BROWSER_NAME_MAX_LEN = 48;
+constexpr int BROWSER_ENTRY_TTL_SECONDS = 180;
+constexpr int BROWSER_PUBLISH_INTERVAL_SECONDS = 60;
+constexpr int BROWSER_CONNECT_TIMEOUT_SECONDS = 5;

@@ -1,0 +1,19 @@
+{
+  "name": "chatbox",
+  "version": "0.0.1",
+  "dependencies": [
+    "boost-asio",
+    {
+      "name": "pdcurses",
+      "platform": "windows"
+    },
+    {
+      "name": "ncurses",
+      "platform": "!windows"
+    },
+    "miniupnpc",
+    "libsodium",
+    "openssl",
+    "sqlite3"
+  ]
+}

@@ -1,0 +1,109 @@
+#pragma once
+
+// Edit the strings in this file to change the English text shown by the
+// curses/TUI interface. Keep keyboard names and command names recognizable
+// because they describe actual key bindings and chat commands.
+namespace chatbox::ui::ui_text
+{
+inline constexpr char app_name[] = "chatbox";
+inline constexpr char resize_terminal[] = "Resize to at least 40 x 12";
+inline constexpr char draft_preserved[] = "Your draft is preserved.";
+inline constexpr char back[] = "Esc  Back";
+inline constexpr char host_badge[] = " / host";
+inline constexpr char lobby[] = "lobby";
+inline constexpr char default_topic[] = "Make yourself at home. Say hello.";
+inline constexpr char rooms[] = "ROOMS  ";
+inline constexpr char switch_room[] = "F2  Switch room";
+inline constexpr char people[] = "PEOPLE  ";
+inline constexpr char more_users[] = " more  /users";
+inline constexpr char you[] = " (you)";
+inline constexpr char fresh_conversation[] = "A fresh conversation";
+inline constexpr char empty_chat_hint[] = "Type a message below, or use /help.";
+inline constexpr char reading_history[] = "Reading history  /  ";
+inline constexpr char lines_below_latest[] = " lines below  /  Ctrl+G to latest";
+inline constexpr char compact_history[] = "History: Ctrl+G latest";
+inline constexpr char message_label[] = "MESSAGE  #";
+inline constexpr char message_placeholder[] = "Write a message or /command";
+inline constexpr char chat_keys_wide[] = "Enter Send   Tab Complete   PgUp/PgDn History   F1 Help   F2 Rooms   Esc Leave";
+inline constexpr char chat_keys_narrow[] = "Enter Send  F1 Help  F2 Rooms  Esc Leave";
+inline constexpr char keyboard_shortcuts[] = "Keyboard shortcuts";
+inline constexpr char send_message[] = "Enter        Send message";
+inline constexpr char move_cursor[] = "Left / Right Move cursor";
+inline constexpr char input_edges[] = "Home / End   Start / end of input";
+inline constexpr char sent_history[] = "Up / Down    Sent-message history";
+inline constexpr char complete_input[] = "Tab          Complete command, room or nickname";
+inline constexpr char scroll_messages[] = "PgUp / PgDn  Read earlier / later messages";
+inline constexpr char latest_messages[] = "Ctrl+G       Jump to latest messages";
+inline constexpr char delete_word[] = "Ctrl+W       Delete previous word";
+inline constexpr char delete_to_cursor[] = "Ctrl+U / K   Delete before / after cursor";
+inline constexpr char switch_rooms_help[] = "F2           Switch rooms";
+inline constexpr char chat_commands_help[] = "/help        Show chat commands";
+inline constexpr char close_panel[] = "F1 or Esc    Close this panel";
+inline constexpr char leave_question[] = "Leave this chat?";
+inline constexpr char leave_chat[] = "Enter  Leave chat";
+inline constexpr char keep_chatting[] = "Esc    Keep chatting";
+inline constexpr char close_help[] = "Esc Close  /help All commands";
+inline constexpr char no_completions[] = "No completions";
+inline constexpr char menu_navigation[] = "Up/Down Select   Enter Open   Esc Back";
+inline constexpr char form_navigation[] = "Tab Next   Shift+Tab Back   Enter Continue   Esc Cancel";
+inline constexpr char toggle_help[] = "  [Left/Right to change]";
+inline constexpr char yes[] = "Yes";
+inline constexpr char no[] = "No";
+inline constexpr char continue_back[] = "Enter Continue   Esc Back";
+inline constexpr char please_wait[] = "Please wait...";
+inline constexpr char server_password[] = "Server password";
+inline constexpr char password_required[] = "This server requires a password to join.";
+inline constexpr char session_ended[] = "Session ended";
+inline constexpr char server_ended_session[] = "The server ended your session.";
+inline constexpr char switch_room_title[] = "Switch room";
+inline constexpr char draft_stays[] = "Your draft stays here while you choose.";
+inline constexpr char people_count[] = " people";
+
+// Startup and setup screens
+inline constexpr char startup_title[] = "Chatting made simple.";
+inline constexpr char startup_subtitle[] = "Join your people, or make a space of your own.";
+inline constexpr char start_chatting[] = "Start chatting";
+inline constexpr char start_chatting_detail[] = "Join, host, or discover a chat server";
+inline constexpr char run_server[] = "Run a dedicated server";
+inline constexpr char run_server_detail[] = "Keep a community online from this machine";
+inline constexpr char run_directory[] = "Run a server directory";
+inline constexpr char run_directory_detail[] = "Help others discover published servers";
+inline constexpr char quit[] = "Quit";
+inline constexpr char see_you[] = "See you next time";
+inline constexpr char join_server[] = "Join a server";
+inline constexpr char join_server_detail[] = "Connect using a host address and port";
+inline constexpr char host_conversation[] = "Host a conversation";
+inline constexpr char host_detail[] = "Create a server and invite your people";
+inline constexpr char discover_servers[] = "Discover servers";
+inline constexpr char discover_detail[] = "Find a community in a server directory";
+inline constexpr char close_chatbox[] = "Close chatbox";
+inline constexpr char port[] = "Port";
+inline constexpr char invalid_port[] = "Enter a port from 0 to 65535.";
+inline constexpr char required_field[] = "This field is required.";
+inline constexpr char tls_certificate[] = "TLS certificate";
+inline constexpr char tls_description[] = "Use the certificate and key for this server.";
+inline constexpr char certificate_path[] = "Certificate chain path";
+inline constexpr char private_key_path[] = "Private key path";
+inline constexpr char browser_host[] = "Browser host (without a port)";
+inline constexpr char browser_host_error[] = "Enter a browser host/IP without a port.";
+inline constexpr char listing_name[] = "Listing name (optional)";
+inline constexpr char public_address[] = "Public address (blank for automatic)";
+inline constexpr char publish_server[] = "Publish your server";
+inline constexpr char publish_description[] = "Help people find your server in the browser.";
+inline constexpr char hello_name[] = "Hello, ";
+inline constexpr char where_to_go[] = "Where would you like to go?";
+inline constexpr char discover_detail_main[] = "Find a community in a server directory";
+inline constexpr char nickname[] = "Nickname";
+inline constexpr char nickname_prompt[] = "What should we call you?";
+inline constexpr char nickname_description[] = "Your nickname is linked to an identity saved on this device.";
+inline constexpr char nickname_error[] = "Use 1-31 characters without spaces, | or commas.";
+inline constexpr char password_optional[] = "Password (optional)";
+inline constexpr char upnp[] = "Automatic port forwarding (UPnP)";
+inline constexpr char use_tls[] = "Use TLS";
+inline constexpr char log_file[] = "Log file (none / stdout / path)";
+inline constexpr char publish_directory[] = "Publish to a server directory";
+inline constexpr char dedicated_server[] = "Dedicated server";
+inline constexpr char dedicated_description[] = "Set up a persistent home for your community.";
+inline constexpr char server_directory[] = "Server directory";
+inline constexpr char directory_description[] = "Publish and discover servers on port 2727.";
+}
