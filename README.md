@@ -29,7 +29,7 @@ Install CMake, the platform's C++ build tools, and vcpkg. Bootstrap vcpkg if nee
 export VCPKG_ROOT="$HOME/vcpkg" # adjust if vcpkg is installed elsewhere
 ```
 
-The scripts build natively for the selected architecture. vcpkg downloads and builds the dependencies on the first run, so the initial build can take a while.
+The scripts build natively for the selected architecture. Linux executables and their vcpkg dependencies are statically linked. Windows uses the static vcpkg triplets and static MSVC runtime. The macOS ARM64 preset uses static vcpkg dependencies; macOS still requires dynamic system libraries. The native macOS preset follows the host triplet. vcpkg downloads and builds the dependencies on the first run, so the initial build can take a while.
 
 ### Linux x64 and aarch64
 

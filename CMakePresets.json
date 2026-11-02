@@ -9,6 +9,7 @@
             "installDir": "${sourceDir}/out/install/${presetName}",
             "cacheVariables": {
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
                 "CMAKE_C_COMPILER": "cl.exe",
                 "CMAKE_CXX_COMPILER": "cl.exe"
             },
@@ -75,7 +76,9 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++",
-                "VCPKG_TARGET_TRIPLET": "x64-linux"
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+                "VCPKG_TARGET_TRIPLET": "x64-linux-static",
+                "CMAKE_EXE_LINKER_FLAGS": "-static"
             },
             "condition": {
                 "type": "equals",
@@ -99,7 +102,9 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++",
-                "VCPKG_TARGET_TRIPLET": "x64-linux"
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+                "VCPKG_TARGET_TRIPLET": "x64-linux-static",
+                "CMAKE_EXE_LINKER_FLAGS": "-static"
             },
             "condition": {
                 "type": "equals",
@@ -123,7 +128,9 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "gcc",
                 "CMAKE_CXX_COMPILER": "g++",
-                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+                "VCPKG_TARGET_TRIPLET": "arm64-linux-static",
+                "CMAKE_EXE_LINKER_FLAGS": "-static"
             },
             "condition": {
                 "type": "equals",
@@ -173,7 +180,8 @@
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++",
-                "VCPKG_TARGET_TRIPLET": "arm64-osx"
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+                "VCPKG_TARGET_TRIPLET": "arm64-osx-static"
             },
             "condition": {
                 "type": "equals",

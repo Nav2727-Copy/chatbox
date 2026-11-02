@@ -10,6 +10,7 @@
 #include <clocale>
 #include <cctype>
 #include <climits>
+#include <cstdlib>
 #include <curses.h>
 
 namespace
@@ -296,6 +297,14 @@ void complete(ChatView& view)
 void initialize_curses_ui()
 {
     std::setlocale(LC_ALL, "");
+#if !defined(_WIN32)
+    // A statically linked vcpkg ncurses can be built with its terminfo
+    // directory pointing into the build tree. Search the host's standard
+    // terminfo locations at runtime so terminal entries remain available
+    // after the executable is moved. Respect an explicit user override.
+    if (std::getenv("TERMINFO") == nullptr && std::getenv("TERMINFO_DIRS") == nullptr)
+        setenv("TERMINFO_DIRS", "/usr/share/terminfo:/lib/terminfo:/usr/lib/terminfo:/etc/terminfo", 0);
+#endif
     // Keep the terminal type selected by the user's terminal emulator. Rewriting
     // xterm-256color to xterm can fail on systems that have only the former's
     // terminfo entry installed.
