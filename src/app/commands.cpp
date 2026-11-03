@@ -57,19 +57,20 @@ std::optional<Command> parse_command(const std::string& input)
 
 void show_command_help()
 {
-    push_message("[system] === Available Commands ===");
+    push_message("[system] === Rooms: /create music, /join music ===");
     push_message("[system] /help                    - Show this help message");
     push_message("[system] /rooms                   - List available rooms");
     push_message("[system] /create <name>           - Create and enter a room");
     push_message("[system] /join <name>             - Switch to a room");
     push_message("[system] /leave                   - Return to the lobby");
     push_message("[system] /topic [text]            - View or set the room topic");
+    push_message("[system] === People: /whisper alex hello ===");
     push_message("[system] /users                   - List users in this room");
     push_message("[system] /clear                   - Clear message history");
     push_message("[system] /time                    - Show current time");
     push_message("[system] /whisper <nick> <msg>    - Whisper within this room");
     push_message("[system] /kick <nick> [reason]    - Kick a room member (room creator/host)");
-    push_message("[system] /exit                    - Exit the application");
+    push_message("[system] /exit                    - Return to server selection");
     push_message("[system] === End Help ===");
 }
 

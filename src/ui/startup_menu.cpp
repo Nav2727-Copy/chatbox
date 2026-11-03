@@ -3,6 +3,7 @@
 #include "ui/curses_ui.h"
 #include "ui/setup_forms.h"
 #include "ui/display_text.h"
+#include "ui/network_task.h"
 
 std::optional<int> run_startup_menu()
 {
@@ -14,9 +15,11 @@ std::optional<int> run_startup_menu()
             { 'c', display::start_chatting, display::start_chatting_detail },
             { 'd', display::run_server, display::run_server_detail },
             { 'b', display::run_directory, display::run_directory_detail },
+            { 'g', "Quick guide", "Joining, hosting, security and keyboard help" },
             { 'q', display::quit, display::see_you }
         });
-        if (mode < 0 || mode == 3) { shutdown_curses_ui(); return 0; }
+        if (mode < 0 || mode == 4) { shutdown_curses_ui(); return 0; }
+        if (mode == 3) { show_walkthrough(); continue; }
         if (mode == 0) return std::nullopt;
         try
         {
@@ -61,5 +64,6 @@ std::optional<int> run_startup_menu()
             return run_browser_server(BROWSER_PORT, std::move(tls));
         }
         catch (const CursesFormCancelled&) { /* Return to the menu. */ }
+        catch (const std::exception& error) { show_curses_notice("Setup failed", error.what()); }
     }
 }

@@ -496,3 +496,12 @@ void ClientSession::close()
             stream_.close();
         });
 }
+
+void ClientSession::abort()
+{
+    auto self = shared_from_this();
+    boost::asio::post(stream_.get_executor(), [this, self] {
+        suppress_leave_notice_ = true;
+        stream_.close();
+    });
+}

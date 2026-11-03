@@ -33,7 +33,13 @@ The scripts build natively for the selected architecture. Linux executables and 
 
 ### Linux x64 and aarch64
 
-Install GCC, Make, CMake, and ncurses development headers (for example, `build-essential` and `libncurses-dev` on Debian/Ubuntu). Run on an x86_64 Linux machine for x64, or an aarch64 Linux machine for aarch64:
+Install GCC, Make, CMake, ncurses development headers, and the Autotools packages needed to build the vcpkg dependencies. On Debian/Ubuntu:
+
+```sh
+sudo apt install build-essential cmake libncurses-dev autoconf autoconf-archive automake libtool
+```
+
+Run on an x86_64 Linux machine for x64, or an aarch64 Linux machine for aarch64:
 
 ```sh
 ./build-linux.sh x64 debug

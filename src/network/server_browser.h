@@ -367,64 +367,67 @@ private:
             TransportStream stream(io,
                 tls_config.enabled ? &tls_context : nullptr);
             boost::system::error_code ec;
-            auto endpoints = resolver.resolve(browser_host, std::to_string(browser_port), ec);
-            if (ec)
-            {
-                error = browser_connection_error(browser_host, browser_port,
-                    "Could not resolve browser server: " + ec.message());
-                return false;
-            }
-
-            if (!connect_with_timeout(io, stream.lowest_layer(), endpoints,
-                browser_host, browser_port, error))
-                return false;
-
-            if (tls_config.enabled)
-            {
-                chatbox::tls::set_server_name(stream.native_tls_handle(), browser_host);
-                stream.client_handshake(ec);
-                if (ec)
-                {
-                    error = browser_connection_error(browser_host, browser_port,
-                        "TLS handshake failed: " + ec.message());
-                    return false;
+            auto run_phase = [&](auto start) {
+                bool done = false;
+                ec.clear();
+                start([&](boost::system::error_code result) { ec = result; done = true; });
+                io.restart();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (!done) {
+                    io.run_for(std::chrono::milliseconds(25));
+                    if (done) break;
+                    const bool cancelled = tls_config.continue_waiting && !tls_config.continue_waiting();
+                    if (cancelled || std::chrono::steady_clock::now() >= deadline) {
+                        resolver.cancel(); stream.close();
+                        io.restart(); io.run(); // drain handlers before their stack references expire
+                        error = cancelled ? "Directory request cancelled." : "Directory request timed out.";
+                        return false;
+                    }
                 }
+                return true;
+            };
+            tcp::resolver::results_type endpoints;
+            if (!run_phase([&](auto finish) {
+                resolver.async_resolve(browser_host, std::to_string(browser_port),
+                    [&, finish](auto result, auto addresses) { endpoints = addresses; finish(result); });
+            })) return false;
+            if (ec) { error = "Could not resolve directory: " + ec.message(); return false; }
+            if (!run_phase([&](auto finish) {
+                boost::asio::async_connect(stream.lowest_layer(), endpoints,
+                    [finish](auto result, auto) { finish(result); });
+            })) return false;
+            if (ec) { error = "Could not connect to directory: " + ec.message(); return false; }
+            if (tls_config.enabled) {
+                chatbox::tls::set_server_name(stream.native_tls_handle(), browser_host);
+                if (!run_phase([&](auto finish) { stream.async_client_handshake(finish); })) return false;
+                if (ec) { error = "Directory TLS handshake failed: " + ec.message(); return false; }
                 std::string notice;
-                if (!chatbox::tls::verify_peer(stream.native_tls_handle(),
-                    browser_host, browser_port, tls_config, notice, error))
-                    return false;
+                if (!chatbox::tls::verify_peer(stream.native_tls_handle(), browser_host, browser_port,
+                    tls_config, notice, error)) return false;
             }
-
             auto payload = chatbox::protocol::encode_frame(request);
-            if (!payload)
-            {
-                error = "Could not encode browser request: " + payload.detail;
-                return false;
-            }
-            stream.write(boost::asio::buffer(*payload.value), ec);
-            if (ec)
-            {
-                error = browser_connection_error(browser_host, browser_port,
-                    "Could not send request: " + ec.message());
-                return false;
-            }
-
+            if (!payload) { error = "Invalid directory request"; return false; }
+            if (!run_phase([&](auto finish) {
+                stream.async_write(boost::asio::buffer(*payload.value),
+                    [finish](auto result, auto) { finish(result); });
+            })) return false;
+            if (ec) { error = "Could not send directory request: " + ec.message(); return false; }
             boost::asio::streambuf buffer(MAX_WIRE_LINE_LENGTH);
-            while (true)
-            {
-                stream.read_until(buffer, '\n', ec);
-                if (ec)
-                    break;
-
+            const auto response_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (response.size() < 1000 && std::chrono::steady_clock::now() < response_deadline) {
+                if (!run_phase([&](auto finish) {
+                    stream.async_read_until(buffer, '\n', [finish](auto result, auto) { finish(result); });
+                })) return false;
+                if (ec) break;
                 std::istream is(&buffer);
                 std::string line;
                 std::getline(is, line);
-
                 auto decoded = chatbox::protocol::decode_frame(line);
-                if (decoded)
-                    response.push_back(std::move(*decoded.value));
+                if (!decoded) { error = "Invalid directory response"; return false; }
+                response.push_back(std::move(*decoded.value));
+                if (response.back() == "END" || response.back() == "OK" || response.back().starts_with("ERROR|")) break;
             }
-
+            stream.close();
             if (response.empty())
             {
                 error = "No response from browser server";
@@ -459,44 +462,7 @@ private:
             + std::to_string(browser_port) + " is open or forwarded.";
     }
 
-    static bool connect_with_timeout(
-        boost::asio::io_context& io,
-        tcp::socket& socket,
-        const tcp::resolver::results_type& endpoints,
-        const std::string& browser_host,
-        uint16_t browser_port,
-        std::string& error)
-    {
-        bool finished = false;
-        boost::system::error_code connect_ec;
 
-        boost::asio::async_connect(socket, endpoints,
-            [&](const boost::system::error_code& ec, const tcp::endpoint&)
-            {
-                connect_ec = ec;
-                finished = true;
-            });
-
-        io.restart();
-        io.run_for(std::chrono::seconds(BROWSER_CONNECT_TIMEOUT_SECONDS));
-
-        if (!finished)
-        {
-            boost::system::error_code ignored;
-            socket.close(ignored);
-            error = browser_connection_error(browser_host, browser_port,
-                "Timed out connecting to browser server");
-            return false;
-        }
-
-        if (connect_ec)
-        {
-            error = browser_connection_error(browser_host, browser_port, connect_ec.message());
-            return false;
-        }
-
-        return true;
-    }
 };
 
 class ServerBrowserPublisher
@@ -530,6 +496,10 @@ public:
             entry_, error, tls_config_))
             return false;
 
+        // Background renewals never call terminal UI or accept new certificates.
+        tls_config_.confirm_certificate = {};
+        tls_config_.continue_waiting = {};
+        tls_config_.trust_on_first_use = false;
         started_ = true;
         stop_requested_ = false;
         worker_ = std::thread([this] { publish_loop(); });

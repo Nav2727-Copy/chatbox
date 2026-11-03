@@ -13,36 +13,109 @@
 #include "ui/display_text.h"
 #include "network/upnp_mapper.h"
 #include "common/utils.h"
+#include "storage/preferences.h"
+#include "network/invite.h"
+#include "ui/network_task.h"
 
 #include <curses.h>
 
 namespace
 {
-std::string explain_connection_error(const std::string& error)
+
+bool reconnect_delay(int attempt)
 {
-    const auto contains = [&](const std::string& text) {
-        return error.find(text) != std::string::npos;
-    };
-    if (contains("resolve") || contains("host not found") || contains("Name or service not known"))
-        return chatbox::ui::ui_text::connection_dns_error;
-    if (contains("timed out") || contains("Timeout"))
-        return chatbox::ui::ui_text::connection_timeout_error;
-    if (contains("TLS") || contains("certificate") || contains("handshake"))
-        return chatbox::ui::ui_text::connection_tls_error;
-    if (contains("refused") || contains("Connection refused"))
-        return chatbox::ui::ui_text::connection_refused_error;
-    return chatbox::ui::ui_text::connection_generic_error;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(attempt);
+    while (std::chrono::steady_clock::now() < until) {
+        show_curses_notice("Reconnecting", "Attempt " + std::to_string(attempt) + " of 3. Draft preserved. Esc cancels.", false);
+        timeout(50); if (getch() == 27) { timeout(-1); return false; }
+    }
+    timeout(-1); return true;
+}
+
+// Own all work and results in the worker, including abandoned results. No UI or
+// stack references cross this boundary; cancellation never waits on router I/O.
+std::shared_ptr<UPnPMapper> prepare_upnp(uint16_t port)
+{
+    struct State { std::atomic<bool> done{false}, cancelled{false}; std::shared_ptr<UPnPMapper> mapper; std::string error; };
+    auto state = std::make_shared<State>();
+    std::thread([state, port] {
+        try {
+            auto mapper = std::shared_ptr<UPnPMapper>(new UPnPMapper, [](UPnPMapper* value) {
+                std::thread([value] { delete value; }).detach();
+            });
+            if (mapper->discover() && !state->cancelled) mapper->openPort(std::to_string(port), "TCP");
+            if (!state->cancelled) state->mapper = std::move(mapper);
+        } catch (const std::exception& error) { state->error = error.what(); }
+        state->done = true;
+    }).detach();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!state->done) {
+        show_curses_notice("Preparing internet hosting", "Discovering your router and forwarding TCP. Esc skips UPnP.", false);
+        timeout(50);
+        if (getch() == 27 || std::chrono::steady_clock::now() >= deadline) {
+            state->cancelled = true; timeout(-1); return {};
+        }
+    }
+    timeout(-1);
+    if (!state->error.empty()) push_message("[hosting] " + state->error);
+    return state->mapper;
+}
+
+std::string explain_connection_error(ConnectionFailure failure)
+{
+    namespace text = chatbox::ui::ui_text;
+    switch (failure) {
+    case ConnectionFailure::Dns: return text::connection_dns_error;
+    case ConnectionFailure::Refused: return text::connection_refused_error;
+    case ConnectionFailure::Timeout: return text::connection_timeout_error;
+    case ConnectionFailure::Tls: return text::connection_tls_error;
+    case ConnectionFailure::Cancelled: return "Cancelled. You can edit the details and retry.";
+    default: return text::connection_generic_error;
+    }
+}
+
+bool connect_with_progress(ChatClient& client, boost::asio::io_context& io,
+    const std::string& host, uint16_t port)
+{
+    bool done = false, success = false;
+    io.restart();
+    client.async_connect(host, port, [&](bool result) { success = result; done = true; });
+    while (!done) {
+        io.poll();
+        if (done) break;
+        show_curses_notice("Joining " + host, client.connection_phase() + ". Press Esc to cancel.", false);
+        timeout(50);
+        if (getch() == 27) client.cancel_connect();
+    }
+    timeout(-1);
+    if (!success) {
+        // Drain ready cancellations; late DNS callbacks are protected by an attempt lifetime token.
+        io.restart();
+        io.poll();
+    }
+    return success;
+}
+
+bool wait_for_session(const std::string& detail, const std::function<bool()>& ready,
+    std::chrono::seconds limit)
+{
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!ready() && std::chrono::steady_clock::now() < deadline) {
+        show_curses_notice("Joining server", detail + " Press Esc to cancel.", false);
+        timeout(50);
+        if (getch() == 27) { timeout(-1); return false; }
+    }
+    timeout(-1);
+    return ready();
 }
 
 // The caller keeps the network thread running throughout authentication and joining.
 std::optional<std::string> join_client_session(ChatClient& client,
     const std::string& nickname)
 {
-    for (int i = 0; i < 20 && !client.auth_required() && !client.auth_resolved(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    if (!client.auth_required() && !client.auth_resolved())
-        return "Protocol handshake timed out.";
+    if (!wait_for_session("Waiting for protocol handshake.", [&] {
+        return client.auth_required() || client.auth_resolved(); }, std::chrono::seconds(5)))
+        return "Protocol handshake timed out or was cancelled.";
 
     if (client.auth_required())
     {
@@ -54,11 +127,9 @@ std::optional<std::string> join_client_session(ChatClient& client,
 
         show_curses_notice("Joining server", "Checking your password...", false);
 
-        for (int i = 0; i < 50 && !client.auth_resolved(); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        if (!client.auth_resolved())
-            return "Authentication timed out.";
+        if (!wait_for_session("Checking your password.", [&] { return client.auth_resolved(); },
+            std::chrono::seconds(5)))
+            return "Authentication timed out or was cancelled.";
         if (!client.auth_ok())
             return "Authentication failed. Wrong password.";
     }
@@ -67,11 +138,9 @@ std::optional<std::string> join_client_session(ChatClient& client,
         return "Server rejected authentication or the protocol handshake.";
 
     client.identify(nickname);
-    for (int i = 0; i < 50 && !client.join_resolved(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    if (!client.join_resolved())
-        return "Joining the server timed out.";
+    if (!wait_for_session("Checking your nickname and identity.", [&] { return client.join_resolved(); },
+        std::chrono::seconds(5)))
+        return "Joining timed out or was cancelled.";
 
     if (client.was_banned())
         return "You are banned from this server.";
@@ -83,22 +152,17 @@ std::optional<std::string> join_client_session(ChatClient& client,
     return std::nullopt;
 }
 
-void close_client_session(ChatClient& client, std::thread& network_thread)
-{
-    client.close();
-    if (network_thread.joinable())
-        network_thread.join();
-}
+
 }
 
 int run_curses_app()
 {
     boost::asio::io_context io;
 
-    std::unique_ptr<ChatServer> server;
+    std::shared_ptr<ChatServer> server;
     std::unique_ptr<ChatClient> client;
-    std::unique_ptr<UPnPMapper> upnp;
-    std::unique_ptr<ServerBrowserPublisher> browser_publisher;
+    std::shared_ptr<UPnPMapper> upnp;
+    std::shared_ptr<ServerBrowserPublisher> browser_publisher;
 
     reset_chat_state();
     initialize_curses_ui();
@@ -112,17 +176,29 @@ int run_curses_app()
 
     using namespace chatbox::ui;
     namespace display = chatbox::ui::ui_text;
+    chatbox::storage::Preferences preferences;
+    try { preferences = chatbox::storage::load_preferences(chatbox::storage::preferences_path()); }
+    catch (const std::exception& error) { show_curses_notice("Could not load preferences", error.what()); }
+    auto save_preferences = [&] {
+        try { chatbox::storage::save_preferences(chatbox::storage::preferences_path(), preferences); }
+        catch (const std::exception& error) { show_curses_notice("Could not save preferences", error.what()); }
+    };
     std::string nickname;
     try
     {
         std::vector<CursesField> fields = {
-            { display::nickname, "", NICK_MAX_LEN, false, false, [](const std::string& value) {
+            { display::nickname, preferences.nickname, NICK_MAX_LEN, false, false, [](const std::string& value) {
                 return is_valid_nickname(value) ? std::string{}
                     : display::nickname_error;
-            } }
+            } },
+            { "Remember nickname and recent servers", preferences.remember ? "yes" : "no", 3, false, true }
         };
         edit_curses_form(display::nickname_prompt, display::nickname_description, fields);
         nickname = fields[0].value;
+        preferences.remember = fields[1].value == "yes";
+        preferences.nickname = nickname;
+        if (!preferences.remember) { preferences.recent_servers.clear(); preferences.options.clear(); }
+        save_preferences();
     }
     catch (const CursesFormCancelled&) { shutdown_curses_ui(); return 0; }
 
@@ -141,7 +217,7 @@ int run_curses_app()
     // Main menu
     // =========================================
 
-    bool configured = false;
+    std::string draft;
     std::string previous_host = "localhost";
     std::string previous_port = "7777";
     std::string previous_host_port = "7777";
@@ -149,22 +225,83 @@ int run_curses_app()
     std::string previous_password;
     std::string previous_upnp = "yes";
     std::string previous_host_tls = "yes";
+    chatbox::tls::ServerConfig previous_host_certificate;
+    previous_host_certificate.certificate_path = preferences.options["host.certificate"];
+    previous_host_certificate.private_key_path = preferences.options["host.key"];
+    std::string hosting_details;
 
-    while (!configured)
+    while (true)
     {
         const int choice = choose_curses_menu(std::string(display::hello_name) + nickname + ".", display::where_to_go, {
             { 'j', display::join_server, display::join_server_detail },
             { 'h', display::host_conversation, display::host_detail },
             { 'b', display::discover_servers, display::discover_detail_main },
+            { 'r', "Recent servers", "Review, join, rename, or remove a remembered server." },
+            { 'n', "Nickname and preferences", "Choose a local identity and whether to remember servers." },
+            { 'i', "Join by invite", "Paste a versioned Chatbox invite and review its settings." },
+            { 'g', "Quick guide", "Revisit joining, hosting and security help." },
             { 'q', display::quit, display::close_chatbox }
         });
-        const int ch = choice < 0 ? 'q' : std::string("jhbq")[choice];
+        const int ch = choice < 0 ? 'q' : std::string("jhbrnigq")[choice];
+        if (ch == 'g') { show_walkthrough(); continue; }
+        std::optional<chatbox::storage::RecentServer> recent;
+        if (ch == 'r') {
+            std::vector<CursesMenuItem> items;
+            for (const auto& entry : preferences.recent_servers)
+                items.push_back({0, entry.name, entry.host + ":" + std::to_string(entry.port)
+                    + (entry.tls ? " (TLS)" : " (insecure plaintext)")});
+            if (items.empty()) { show_curses_notice("Recent servers", "Enable remembering in the nickname form, then join a server successfully."); continue; }
+            const int selected = choose_curses_menu("Recent servers", "Choose a saved connection.", items);
+            if (selected < 0) continue;
+            const int action = choose_curses_menu("Saved server", items[selected].description, {
+                {'j', "Join", "Connect using these settings."},
+                {'n', "Rename", "Change the display name."},
+                {'d', "Remove", "Forget this saved connection."}
+            });
+            if (action == 0) recent = preferences.recent_servers[selected];
+            else if (action == 1) {
+                std::vector<CursesField> fields{required_field("Display name", items[selected].title, HOST_MAX_LEN)};
+                try {
+                    edit_curses_form("Rename server", "Connection details stay the same.", fields);
+                    preferences.recent_servers[selected].name = fields[0].value;
+                    save_preferences();
+                } catch (const CursesFormCancelled&) {}
+                continue;
+            } else if (action == 2) {
+                preferences.recent_servers.erase(preferences.recent_servers.begin() + selected);
+                save_preferences();
+                continue;
+            } else continue;
+        }
         try
         {
             if (ch == 'q' || ch == 'Q')
             {
                 shutdown_curses_ui();
                 return 0;
+            }
+
+            else if (ch == 'n') {
+                std::vector<CursesField> fields = {
+                    {display::nickname, nickname, NICK_MAX_LEN, false, false, [](const std::string& value) {
+                        return is_valid_nickname(value) ? std::string{} : display::nickname_error;
+                    }},
+                    {"Remember nickname and recent servers", preferences.remember ? "yes" : "no", 3, false, true}
+                };
+                edit_curses_form("Nickname and preferences", "Each nickname uses its existing local identity key.", fields);
+                ClientIdentity selected_identity;
+                bool created = false;
+                if (!load_or_create_identity(fields[0].value, selected_identity, created)) {
+                    show_curses_notice("Identity unavailable", "Could not load the identity for that nickname.");
+                    continue;
+                }
+                nickname = fields[0].value;
+                local_identity = selected_identity;
+                preferences.nickname = nickname;
+                preferences.remember = fields[1].value == "yes";
+                if (!preferences.remember) { preferences.recent_servers.clear(); preferences.options.clear(); }
+                save_preferences();
+                continue;
             }
 
             // ---- HOST ----
@@ -188,11 +325,23 @@ int run_curses_app()
                 const auto& room_password = fields[1].value;
                 const bool enable_upnp = fields[2].value == "yes";
                 const bool publish_to_browser = fields[3].value == "yes";
-                chatbox::tls::ServerConfig host_tls;
+                auto& host_tls = previous_host_certificate;
                 host_tls.enabled = fields[4].value == "yes";
                 configure_tls(host_tls);
+                preferences.options["host.certificate"] = host_tls.certificate_path;
+                preferences.options["host.key"] = host_tls.private_key_path;
+                save_preferences();
                 PublicationSettings publication;
-                if (publish_to_browser) publication = configure_publication();
+                if (publish_to_browser) {
+                    publication = configure_publication({preferences.options["publish.host"], preferences.options["publish.name"],
+                        preferences.options["publish.address"], preferences.options["publish.tls"] != "no",
+                        preferences.options["publish.ca"], preferences.options["publish.pin"]});
+                    preferences.options["publish.host"] = publication.host; preferences.options["publish.name"] = publication.name;
+                    preferences.options["publish.address"] = publication.public_host;
+                    preferences.options["publish.tls"] = publication.tls ? "yes" : "no";
+                    preferences.options["publish.ca"] = publication.ca_path; preferences.options["publish.pin"] = publication.fingerprint;
+                    save_preferences();
+                }
                 const auto& browser_host_buf = publication.host;
                 const auto& browser_name_buf = publication.name;
                 const auto& public_host_buf = publication.public_host;
@@ -220,7 +369,7 @@ int run_curses_app()
                     auto host_storage = std::make_shared<chatbox::storage::SQLiteStorage>(
                         chatbox_database_path());
                     host_storage->import_legacy_files("bans.txt", "identities.txt");
-                    server = std::make_unique<ChatServer>(
+                    server = std::make_shared<ChatServer>(
                         io,
                         port,
                         room_password,
@@ -231,10 +380,11 @@ int run_curses_app()
                     if (!server->register_local_identity(nickname, local_identity.public_key_hex))
                     {
                         show_curses_notice("Could not continue", "Your nickname is registered to another identity key.");
-                        server.reset();
+                        server->stop(); io.restart(); io.run(); server.reset();
                         continue;
                     }
 
+                    port = server->port();
                     server->start_local_user();
                     push_message("[system] Hosting on port " + std::to_string(port));
                     push_message(std::string(display::host_listening_prefix) + std::to_string(port)
@@ -246,66 +396,32 @@ int run_curses_app()
 
                     std::string publish_host = sanitize_browser_field(public_host_buf, HOST_MAX_LEN);
 
-                    // UPnP
-                    if (enable_upnp)
-                    {
-                        upnp = std::make_unique<UPnPMapper>();
-                        push_message("[system] Attempting UPnP port mapping...");
-
-                        if (upnp->discover())
-                        {
-                            if (upnp->openPortBoth(std::to_string(port)))
-                            {
-                                push_message("[system] UPnP OK - port " + std::to_string(port) + " opened on router");
-                                push_message(std::string(display::upnp_host_mapping) + std::to_string(port)
-                                    + display::upnp_share_address_suffix);
-                                if (!upnp->externalIP().empty())
-                                {
-                                    push_message("[system] External address: " + upnp->externalIP() + ":" + std::to_string(port));
-                                    push_message("[system] Share that address with your peer");
-                                    if (publish_host.empty())
-                                        publish_host = upnp->externalIP();
-                                }
-                            }
-                            else
-                            {
-                                push_message("[system] UPnP mapping failed: " + upnp->lastError());
-                                push_message("[system] You may need to forward port " + std::to_string(port) + " manually");
-                                push_message(std::string(display::host_manual_forward_prefix) + std::to_string(port) + display::host_manual_forward_suffix);
-                            }
-                        }
-                        else
-                        {
-                            push_message("[system] UPnP unavailable: " + upnp->lastError());
-                            push_message("[system] Forward port " + std::to_string(port) + " manually for internet access");
-                            push_message(std::string(display::host_manual_forward_prefix) + std::to_string(port) + display::host_manual_forward_suffix);
-                        }
-                    }
-                    else
-                    {
-                        push_message("[system] UPnP disabled; forward port " + std::to_string(port) + " manually for internet access");
-                        push_message(std::string(display::host_local_only_prefix) + std::to_string(port) + display::host_local_only_suffix);
-                    }
-
-                    // LAN addresses
-                    try
-                    {
-                        tcp::resolver resolver(io);
-                        auto results = resolver.resolve(boost::asio::ip::host_name(), "");
-                        push_message("[system] LAN addresses:");
-                        for (auto& r : results)
-                        {
-                            auto addr = r.endpoint().address();
-                            if (!addr.is_loopback())
-                            {
-                                push_message("[system]   " + addr.to_string() + ":" + std::to_string(port));
-                                push_message(display::host_local_address_note);
-                                if (publish_host.empty())
-                                    publish_host = addr.to_string();
-                            }
-                        }
-                    }
-                    catch (...) {}
+                    hosting_details = "Listening on TCP port " + std::to_string(port)
+                        + (host_tls.enabled ? " with TLS.\n" : " — INSECURE plaintext.\n")
+                        + (room_password.empty() ? "No server password.\n" : "Password required (share separately).\n")
+                        + "TLS protects transport, not end-to-end messages.\n";
+                    if (host_tls.enabled) hosting_details += "SHA-256: "
+                        + chatbox::tls::certificate_sha256_fingerprint(host_tls.certificate_path) + "\n";
+                    if (enable_upnp) upnp = prepare_upnp(port);
+                    if (upnp && upnp->lastError().empty()) {
+                        hosting_details += "Router TCP mapping requested successfully; internet reachability is NOT verified.\n";
+                        if (publish_host.empty()) publish_host = upnp->externalIP();
+                    } else hosting_details += "UPnP unavailable, failed, skipped, or timed out. "
+                        + (upnp ? upnp->lastError() : "") + "\n";
+                    hosting_details += "For LAN guests, use this computer's LAN address. For internet guests, use a public address "
+                        "and forward TCP port " + std::to_string(port) + " to this computer. Check your firewall too.\n";
+                    // Interface enumeration avoids blocking DNS merely to find local addresses.
+                    auto add_invite = [&](const std::string& address, const std::string& scope) {
+                        hosting_details += scope + ": " + address + ":" + std::to_string(port) + "\n"
+                            + chatbox::make_invite({address, port, host_tls.enabled, !room_password.empty(),
+                                host_tls.enabled ? chatbox::tls::certificate_sha256_fingerprint(host_tls.certificate_path) : ""}) + "\n";
+                    };
+                    for (const auto& address : local_network_addresses()) add_invite(address, "LAN");
+                    if (!publish_host.empty()) add_invite(publish_host, "Public/advertised (unverified)");
+                    add_invite("localhost", "This computer only");
+                    hosting_details += "Invites contain connection details and a public fingerprint, never passwords or private keys. "
+                        "Share through a trusted channel. F3 reopens this summary.";
+                    show_curses_notice("Hosting summary / invites", hosting_details);
 
                     if (publish_to_browser)
                     {
@@ -321,53 +437,100 @@ int run_curses_app()
                         entry.has_password = !room_password.empty();
                         entry.uses_tls = host_tls.enabled;
 
-                        browser_publisher = std::make_unique<ServerBrowserPublisher>(
-                            browser_host,
-                            BROWSER_PORT,
-                            entry,
-                            [&server] {
-                                return server
-                                    ? static_cast<int>(server->connected_users().size())
-                                    : 0;
+                        const auto weak_server = std::weak_ptr<ChatServer>(server);
+                        auto directory_tls = interactive_tls();
+                        directory_tls.enabled = publication.tls; directory_tls.ca_path = publication.ca_path;
+                        directory_tls.expected_fingerprint = publication.fingerprint;
+                        auto publisher = run_network_task<std::shared_ptr<ServerBrowserPublisher>>(directory_tls,
+                            [browser_host, entry, weak_server](const auto& config) {
+                                auto result = std::shared_ptr<ServerBrowserPublisher>(new ServerBrowserPublisher(
+                                    browser_host, BROWSER_PORT, entry, [weak_server] {
+                                        const auto host = weak_server.lock();
+                                        return host ? static_cast<int>(host->connected_users().size()) : 0;
+                                    }, config), [](ServerBrowserPublisher* value) {
+                                        std::thread([value] { delete value; }).detach();
+                                    });
+                                std::string error;
+                                if (!result->start(error)) throw std::runtime_error(error);
+                                return result;
                             });
-
-                        std::string error;
-                        if (browser_publisher->start(error))
-                        {
-                            push_message("[system] Published to browser "
-                                + browser_host + ":" + std::to_string(BROWSER_PORT)
-                                + " as " + entry.host + ":" + std::to_string(entry.port));
+                        if (publisher) {
+                            browser_publisher = *publisher;
+                            push_message("[hosting] Published directory listing for " + entry.host);
                         }
                         else
                         {
-                            push_message("[system] Browser publish failed: " + error);
+                            push_message("[hosting] Directory publication cancelled or timed out.");
                             browser_publisher.reset();
                         }
                     }
 
-                    configured = true;
+                    io.restart();
+                    std::thread network_thread([&] { io.run(); });
+                    ChatInputContext context;
+                    context.server = server.get(); context.local_nickname = nickname;
+                    context.host_commands_enabled = true; context.connection_details = hosting_details;
+                    try { run_curses_chat_loop(context, draft); }
+                    catch (...) { server->stop(); network_thread.join(); throw; }
+                    browser_publisher.reset(); upnp.reset();
+                    server->stop();
+                    network_thread.join();
+                    io.restart(); io.poll(); server.reset();
+                    reset_chat_state();
+                    continue;
                 }
                 catch (const std::exception& error)
                 {
-                    show_curses_notice("Connection failed", error.what());
+                    if (server) { server->stop(); io.restart(); io.run(); server.reset(); }
+                    browser_publisher.reset(); upnp.reset();
+                    show_curses_notice("Hosting failed", error.what());
                     continue;
                 }
             }
 
             // ---- JOIN / BROWSE ----
-            else if (ch == 'j' || ch == 'J' || ch == 'b' || ch == 'B')
+            else if (ch == 'j' || ch == 'J' || ch == 'b' || ch == 'B' || ch == 'i' || recent)
             {
                 std::string selected_host;
                 uint16_t selected_port = 0;
-                chatbox::tls::ClientConfig client_tls;
+                auto client_tls = interactive_tls();
 
-                if (ch == 'b' || ch == 'B')
+                if (recent) {
+                    selected_host = recent->host;
+                    selected_port = recent->port;
+                    client_tls.enabled = recent->tls;
+                    client_tls.ca_path = recent->ca_path;
+                    client_tls.expected_fingerprint = recent->fingerprint;
+                }
+                else if (ch == 'i') {
+                    std::vector<CursesField> fields{required_field("Chatbox invite", "", 1024)};
+                    edit_curses_form("Join by invite", "Paste an invite from someone you trust. It contains no password.", fields);
+                    const auto invite = chatbox::parse_invite(fields[0].value);
+                    show_curses_notice("Review invite", invite.host + ":" + std::to_string(invite.port)
+                        + (invite.tls ? "\nTLS enabled." : "\nINSECURE plaintext exposes messages and passwords.")
+                        + (invite.password_required ? "\nPassword required; ask the host separately." : "\nNo password indicated.")
+                        + "\nSHA-256: " + (invite.fingerprint.empty() ? "not supplied" : invite.fingerprint)
+                        + "\nA fingerprint is useful only if this invite came through a trusted channel.");
+                    if (choose_curses_menu("Use this invite?", "Review the address and security details first.", {
+                        {'b', "Back", "Discard invite."}, {'j', "Join", "Use these connection details."}}) != 1) continue;
+                    selected_host = invite.host; selected_port = invite.port;
+                    client_tls.enabled = invite.tls; client_tls.expected_fingerprint = invite.fingerprint;
+                }
+                else if (ch == 'b'  || ch == 'B')
                 {
                     std::vector<CursesField> fields = {
-                        required_field("Directory host", "", HOST_MAX_LEN),
-                        { "Use TLS (match the directory server)", "yes", 3, false, true }
+                        required_field("Directory host", preferences.options["directory.host"], HOST_MAX_LEN),
+                        { "Use TLS (no = insecure plaintext)", preferences.options["directory.tls"] == "no" ? "no" : "yes", 3, false, true },
+                        { "Trusted CA file (optional)", preferences.options["directory.ca"], LOGFILE_MAX_LEN },
+                        { "SHA-256 fingerprint (optional)", preferences.options["directory.pin"], 95 }
                     };
                     edit_curses_form("Discover servers", "Connect to a server directory to see who is online.", fields);
+                    preferences.options["directory.host"] = fields[0].value;
+                    preferences.options["directory.tls"] = fields[1].value;
+                    preferences.options["directory.ca"] = fields[2].value;
+                    preferences.options["directory.pin"] = fields[3].value;
+                    save_preferences();
+                    client_tls.ca_path = fields[2].value; client_tls.expected_fingerprint = fields[3].value;
                     const auto& browser_host_buf = fields[0].value;
                     client_tls.enabled = fields[1].value == "yes";
                     show_curses_notice("Finding servers", "Loading the server directory...", false);
@@ -379,18 +542,22 @@ int run_curses_app()
                         continue;
                     }
 
-                    std::vector<BrowserEntry> entries;
-                    std::string error;
-                    if (!ServerBrowserClient::list_servers(browser_host, BROWSER_PORT,
-                        entries, error, client_tls))
-                    {
-                        show_curses_notice("Directory unavailable", error);
-                        continue;
+                    struct DirectoryResult { std::vector<BrowserEntry> entries; std::string error; bool success; };
+                    auto result = run_network_task<DirectoryResult>(client_tls, [browser_host](const auto& config) {
+                        DirectoryResult result;
+                        result.success = ServerBrowserClient::list_servers(browser_host, BROWSER_PORT,
+                            result.entries, result.error, config);
+                        return result;
+                    });
+                    if (!result) continue;
+                    if (!result->success) {
+                        show_curses_notice("Directory unavailable", result->error + "\nChoose Discover to retry or Join for a manual address."); continue;
                     }
+                    const auto& entries = result->entries;
 
                     if (entries.empty())
                     {
-                        show_curses_notice("Could not continue", "No servers are published there right now.");
+                        show_curses_notice("Could not continue", "No servers are published there right now. Ask the host for an invite or choose Join from the menu. Choose Discover again to refresh.");
                         continue;
                     }
 
@@ -401,6 +568,8 @@ int run_curses_app()
                     if (selected < 0) continue;
                     const int choice = selected + 1;
 
+                    show_curses_notice(entries[choice - 1].name, browser_entry_summary(entries[choice - 1]));
+                    client_tls = interactive_tls();
                     selected_host = entries[choice - 1].host;
                     selected_port = entries[choice - 1].port;
                     client_tls.enabled = entries[choice - 1].uses_tls;
@@ -412,7 +581,9 @@ int run_curses_app()
                         { display::join_port_field, previous_port, 5, false, false, [](const std::string& value) {
                             uint16_t port = 0;
                             return parse_port(value, port) ? std::string{} : ui_text::invalid_port;
-                        } }, { display::join_tls_field, previous_join_tls, 3, false, true }
+                        } }, { display::join_tls_field, previous_join_tls, 3, false, true },
+                        { "Trusted CA file (optional)", preferences.options["join.ca"], LOGFILE_MAX_LEN },
+                        { "SHA-256 fingerprint (optional)", preferences.options["join.pin"], 95 }
                     };
                     edit_curses_form(display::join_server, display::join_form_guidance, fields);
                     selected_host = fields[0].value;
@@ -421,83 +592,72 @@ int run_curses_app()
                     previous_join_tls = fields[2].value;
                     parse_port(fields[1].value, selected_port);
                     client_tls.enabled = fields[2].value == "yes";
+                    client_tls.ca_path = fields[3].value; client_tls.expected_fingerprint = fields[4].value;
+                    preferences.options["join.ca"] = fields[3].value; preferences.options["join.pin"] = fields[4].value;
+                    save_preferences();
                 }
 
-                show_curses_notice("Joining server", "Connecting to " + selected_host + ":" + std::to_string(selected_port) + "...", false);
-                try
-                {
+                std::string restore_room;
+                int retries = 0;
+                bool reconnecting = false;
+                while (true) {
+                    if (reconnecting && !reconnect_delay(++retries)) break;
+                    reset_chat_state();
                     client = std::make_unique<ChatClient>(io, client_tls);
                     client->set_identity(local_identity);
-
-                    if (!client->connect(selected_host, selected_port))
-                    {
-                        show_curses_notice("Connection failed", explain_connection_error(client->connect_error()));
+                    if (!connect_with_progress(*client, io, selected_host, selected_port)) {
+                        const auto failure = client->connection_failure();
+                        if (reconnecting && retries < 3 && failure != ConnectionFailure::Tls && failure != ConnectionFailure::Cancelled) {
+                            client.reset(); continue;
+                        }
+                        show_curses_notice("Connection failed", explain_connection_error(failure) + "\nDetails: " + client->connect_error());
                         client.reset();
-                        continue;
+                        if (failure == ConnectionFailure::Cancelled || choose_curses_menu("Connection ended", "Your unsent draft is preserved.", {
+                            {'m', "Server selection", "Correct settings or select another server."},
+                            {'r', "Retry", "Try these settings again."}}) != 1) break;
+                        reconnecting = false; retries = 0; continue;
                     }
-
-                    // Start network thread early so async reads can progress.
+                    io.restart();
+                    auto work = boost::asio::make_work_guard(io);
                     std::thread network_thread([&] { io.run(); });
-
-                    if (auto error = join_client_session(*client, nickname))
-                    {
-                        show_curses_notice("Could not join", *error + display::join_error_next_step);
-                        close_client_session(*client, network_thread);
-                        client.reset();
-                        io.restart();
-                        continue;
-                    }
-
-                    push_message("[system] Connected to " + selected_host + ":" + std::to_string(selected_port));
-                    push_message("[system] Your identity: " + identity_fingerprint(local_identity.public_key_hex));
-                    configured = true;
-
-                    ChatInputContext context;
-                    context.client = client.get();
-                    context.local_nickname = nickname;
-                    run_curses_chat_loop(context);
-
-                    // Shutdown client
-                    if (!was_kicked())
-                        client->send(chatbox::protocol::ClientMessage{
-                            chatbox::protocol::Disconnect{} });
-                    close_client_session(*client, network_thread);
-
-                    shutdown_curses_ui();
-                    return 0;
+                    // Ensure every exit joins before destroying the client or its io_context.
+                    auto finish = [&] {
+                        client->close(); work.reset(); network_thread.join(); io.restart(); io.poll();
+                    };
+                    try {
+                        if (auto error = join_client_session(*client, nickname)) {
+                            finish(); show_curses_notice("Could not join", *error + display::join_error_next_step);
+                            break; // auth / ban / nickname errors always require user action
+                        }
+                        if (!restore_room.empty() && restore_room != "lobby") handle_chat_input("/join " + restore_room,
+                            ChatInputContext{client.get(), nullptr, nickname});
+                        push_message("[system] Connected to " + selected_host + ":" + std::to_string(selected_port));
+                        if (preferences.remember) {
+                            preferences.remember_server({selected_host, selected_host, selected_port, client_tls.enabled,
+                                client_tls.ca_path, client_tls.expected_fingerprint}); save_preferences();
+                        }
+                        ChatInputContext context;
+                        context.client = client.get(); context.local_nickname = nickname;
+                        context.connection_details = "Connected to " + selected_host + ":" + std::to_string(selected_port)
+                            + (client_tls.enabled ? " with TLS." : " — INSECURE plaintext.")
+                            + "\nTLS protects transport, not end-to-end chat. Trust store: " + client_tls.trust_store_path;
+                        const auto result = run_curses_chat_loop(context, draft);
+                        restore_room = active_room_name();
+                        const bool denied = client->was_kicked() || client->was_banned();
+                        finish();
+                        if (result == ChatExit::Left || denied) break;
+                        reconnecting = true; retries = 0;
+                    } catch (...) { if (network_thread.joinable()) finish(); throw; }
                 }
-                catch (const std::exception& error)
-                {
-                    show_curses_notice("Connection failed", error.what());
-                    continue;
-                }
+                client.reset(); reset_chat_state();
+                continue;
             }
         }
         catch (const CursesFormCancelled&) { continue; }
+        catch (const std::exception& error) { show_curses_notice("Setup failed", error.what()); }
     }
 
-    // =========================================
-    // Host: run chat loop
-    // =========================================
-
-    std::thread network_thread([&] { io.run(); });
-
-    ChatInputContext context;
-    context.server = server.get();
-    context.local_nickname = nickname;
-    context.host_commands_enabled = true;
-    run_curses_chat_loop(context);
-
-    // =========================================
-    // Shutdown (host path)
-    // =========================================
-
-    browser_publisher.reset();
-    upnp.reset();
-
     shutdown_curses_ui();
-    io.stop();
-    network_thread.join();
     return 0;
 }
 

@@ -31,6 +31,7 @@ public:
     void deliver(const chatbox::protocol::ServerMessage& msg);
     void deliver_text(const std::string& text);
     void close();
+    void abort();
 
     std::string nickname() const
     {
@@ -942,27 +943,22 @@ public:
 
     void stop()
     {
-        boost::asio::post(io_, [this]
+        boost::asio::post(io_, [this] {
+            boost::system::error_code ignored;
+            acceptor_.close(ignored);
+            std::vector<std::shared_ptr<ClientSession>> sessions;
             {
-                boost::system::error_code ignored;
-                acceptor_.close(ignored);
-            });
-
-        std::vector<std::shared_ptr<ClientSession>> sessions;
-        {
-            std::lock_guard lock(sessions_mutex_);
-            sessions.assign(sessions_.begin(), sessions_.end());
-            sessions_.clear();
-        }
-        {
-            std::lock_guard lock(rooms_mutex_);
-            for (auto& [id, room] : rooms_)
-                room.members.clear();
-        }
-        for (auto& session : sessions)
-            session->close();
-        if (storage_)
-            storage_->flush();
+                std::lock_guard lock(sessions_mutex_);
+                sessions.assign(sessions_.begin(), sessions_.end());
+                sessions_.clear();
+            }
+            {
+                std::lock_guard lock(rooms_mutex_);
+                for (auto& [id, room] : rooms_) room.members.clear();
+            }
+            for (auto& session : sessions) session->abort();
+            if (storage_) storage_->flush();
+        });
     }
 
 private:
@@ -1167,7 +1163,7 @@ private:
     {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket socket)
             {
-                if (!ec)
+                if (!ec && acceptor_.is_open())
                 {
                     auto session = std::make_shared<ClientSession>(
                         std::move(socket), *this, tls_context_.get());

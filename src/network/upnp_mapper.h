@@ -19,13 +19,18 @@ public:
         if (!discovered_)
             return;
 
-        for (auto& m : mappings_)
+        std::lock_guard lock(mapping_mutex_);
+        for (auto& m : mappings_) {
+            const auto key = std::string(urls_.controlURL) + "|" + m.port + "|" + m.proto;
+            if (mapping_owners_[key] != m.owner) continue;
+            mapping_owners_.erase(key);
             UPNP_DeletePortMapping(
                 urls_.controlURL,
                 data_.first.servicetype,
                 m.port.c_str(),
                 m.proto.c_str(),
                 nullptr);
+        }
 
         FreeUPNPUrls(&urls_);
     }
@@ -55,6 +60,7 @@ public:
 
         if (status != 1)
         {
+            FreeUPNPUrls(&urls_);
             lastError_ = "No valid IGD found (status " + std::to_string(status) + ")";
             return false;
         }
@@ -82,11 +88,7 @@ public:
         if (!discovered_)
             return false;
 
-        UPNP_DeletePortMapping(
-            urls_.controlURL,
-            data_.first.servicetype,
-            port.c_str(), proto.c_str(), nullptr);
-
+        std::lock_guard lock(mapping_mutex_);
         int r = UPNP_AddPortMapping(
             urls_.controlURL,
             data_.first.servicetype,
@@ -100,7 +102,9 @@ public:
             return false;
         }
 
-        mappings_.push_back({ port, proto });
+        const auto owner = ++next_owner_;
+        mapping_owners_[std::string(urls_.controlURL) + "|" + port + "|" + proto] = owner;
+        mappings_.push_back({ port, proto, owner });
         return true;
     }
 
@@ -116,7 +120,10 @@ public:
     std::string lastError()  const { return lastError_; }
 
 private:
-    struct Mapping { std::string port, proto; };
+    struct Mapping { std::string port, proto; std::uint64_t owner; };
+    inline static std::mutex mapping_mutex_;
+    inline static std::map<std::string, std::uint64_t> mapping_owners_;
+    inline static std::uint64_t next_owner_ = 0;
 
     UPNPUrls    urls_{};
     IGDdatas    data_{};

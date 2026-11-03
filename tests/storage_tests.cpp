@@ -1,4 +1,5 @@
 #include "storage/storage.h"
+#include "storage/preferences.h"
 #include "common/utils.h"
 
 #include <sqlite3.h>
@@ -40,6 +41,41 @@ void remove_database(const std::filesystem::path& path)
     std::filesystem::remove(path, ignored);
     std::filesystem::remove(path.string() + "-wal", ignored);
     std::filesystem::remove(path.string() + "-shm", ignored);
+}
+
+void preferences_round_trip_and_opt_out()
+{
+    const auto path = temporary_path("preferences.db");
+    CHECK(!storage::load_preferences(path.string()).remember);
+    storage::Preferences preferences;
+    preferences.remember = true;
+    preferences.nickname = "alice";
+    preferences.options["directory.host"] = "directory.example";
+    preferences.remember_server({"My room", "::1", 7777, true});
+    preferences.remember_server({"Another", "localhost", 1234, false});
+    preferences.remember_server({"Ignore replacement label", "::1", 7777, true});
+    CHECK(preferences.recent_servers.size() == 2);
+    CHECK(preferences.recent_servers[0].name == "My room");
+    storage::save_preferences(path.string(), preferences);
+    auto restored = storage::load_preferences(path.string());
+    CHECK(restored.remember && restored.nickname == "alice");
+    CHECK(restored.options["directory.host"] == "directory.example");
+    CHECK(restored.recent_servers.size() == 2);
+    CHECK(restored.recent_servers[0].host == "::1");
+    CHECK(!restored.recent_servers[1].tls);
+    restored.recent_servers[0].name = "Renamed";
+    restored.recent_servers.erase(restored.recent_servers.begin() + 1);
+    storage::save_preferences(path.string(), restored);
+    restored = storage::load_preferences(path.string());
+    CHECK(restored.recent_servers.size() == 1 && restored.recent_servers[0].name == "Renamed");
+    restored.remember = false;
+    storage::save_preferences(path.string(), restored);
+    restored = storage::load_preferences(path.string());
+    CHECK(!restored.remember && restored.nickname.empty() && restored.recent_servers.empty() && restored.options.empty());
+    for (int i = 0; i < 15; ++i)
+        preferences.remember_server({"Room", "host" + std::to_string(i), 7777, true});
+    CHECK(preferences.recent_servers.size() == 10);
+    remove_database(path);
 }
 
 void persistence_and_pagination()
@@ -182,6 +218,7 @@ int main()
     if (sodium_init() < 0)
         return EXIT_FAILURE;
 
+    preferences_round_trip_and_opt_out();
     persistence_and_pagination();
     legacy_files_are_imported_once();
     schema_upgrade_is_transactional();

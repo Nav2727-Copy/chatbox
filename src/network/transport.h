@@ -60,6 +60,19 @@ public:
                 });
     }
 
+    template <typename Handler>
+    void async_client_handshake(Handler&& handler)
+    {
+        if (tls_)
+            tls_->async_handshake(boost::asio::ssl::stream_base::client,
+                std::forward<Handler>(handler));
+        else
+            boost::asio::post(get_executor(),
+                [handler = std::forward<Handler>(handler)]() mutable {
+                    handler(boost::system::error_code{});
+                });
+    }
+
     void client_handshake(boost::system::error_code& error)
     {
         if (tls_)

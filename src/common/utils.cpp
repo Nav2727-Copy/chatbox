@@ -305,3 +305,51 @@ std::string join_fields(const std::vector<std::string>& fields, size_t start, ch
     }
     return out;
 }
+
+#ifdef _WIN32
+#include <iphlpapi.h>
+#else
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
+std::vector<std::string> local_network_addresses()
+{
+    std::set<std::string> addresses;
+#ifdef _WIN32
+    ULONG size = 16384;
+    std::vector<unsigned char> buffer(size);
+    auto* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    ULONG result = GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, adapters, &size);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size); adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        result = GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, adapters, &size);
+    }
+    if (result != NO_ERROR) return {};
+    for (auto* adapter = adapters; adapter; adapter = adapter->Next)
+        for (auto* address = adapter->FirstUnicastAddress; address; address = address->Next) {
+            const auto* raw = address->Address.lpSockaddr;
+#else
+    ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) != 0) return {};
+    std::unique_ptr<ifaddrs, decltype(&freeifaddrs)> cleanup(interfaces, freeifaddrs);
+    for (auto* address = interfaces; address; address = address->ifa_next) {
+        const auto* raw = address->ifa_addr;
+#endif
+        if (!raw) continue;
+        boost::asio::ip::address value;
+        if (raw->sa_family == AF_INET) {
+            const auto* v4 = reinterpret_cast<const sockaddr_in*>(raw);
+            value = boost::asio::ip::address_v4(ntohl(v4->sin_addr.s_addr));
+        } else if (raw->sa_family == AF_INET6) {
+            const auto* v6 = reinterpret_cast<const sockaddr_in6*>(raw);
+            boost::asio::ip::address_v6::bytes_type bytes;
+            std::copy_n(v6->sin6_addr.s6_addr, bytes.size(), bytes.begin());
+            value = boost::asio::ip::address_v6(bytes, v6->sin6_scope_id);
+            // Link-local scope IDs are local to this device, not portable invites.
+            if (value.to_v6().is_link_local()) continue;
+        } else continue;
+        if (!value.is_loopback() && !value.is_unspecified()) addresses.insert(value.to_string());
+    }
+    return {addresses.begin(), addresses.end()};
+}

@@ -135,6 +135,30 @@ chatbox::tls::ServerConfig server_config(const CertificateFiles& files)
     return { true, files.certificate.string(), files.private_key.string() };
 }
 
+void generated_certificates_are_reused()
+{
+    const auto directory = temporary_path("generated");
+    auto config = chatbox::tls::ensure_host_certificate(directory.string());
+    const auto fingerprint = chatbox::tls::certificate_sha256_fingerprint(config.certificate_path);
+    CHECK(fingerprint.size() == 64);
+    const auto reused = chatbox::tls::ensure_host_certificate(directory.string());
+    CHECK(chatbox::tls::certificate_sha256_fingerprint(reused.certificate_path) == fingerprint);
+#ifndef _WIN32
+    const auto permissions = std::filesystem::status(config.private_key_path).permissions();
+    CHECK((permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all))
+        == std::filesystem::perms::none);
+#endif
+    boost::asio::ssl::context context(boost::asio::ssl::context::tls_server);
+    chatbox::tls::configure_server_context(context, config);
+    std::filesystem::remove(config.private_key_path);
+    bool rejected = false;
+    try { chatbox::tls::ensure_host_certificate(directory.string()); }
+    catch (const std::exception&) { rejected = true; }
+    CHECK(rejected);
+    CHECK(chatbox::tls::certificate_sha256_fingerprint(config.certificate_path) == fingerprint);
+    std::filesystem::remove_all(directory);
+}
+
 void trusted_ca_and_pin_are_accepted(const CertificateFiles& files)
 {
     boost::asio::io_context server_io;
@@ -221,6 +245,49 @@ void certificate_changes_are_blocked(const CertificateFiles& first,
     remove_file(trust_store);
 }
 
+void explicit_trust_decisions(const CertificateFiles& files)
+{
+    const auto path = temporary_path("explicit-trust.txt");
+    boost::asio::io_context server_io;
+    ChatServer server(server_io, 0, "", nullptr, "", nullptr, server_config(files));
+    std::thread server_thread([&] { server_io.run(); });
+    chatbox::tls::ClientConfig config;
+    config.trust_store_path = path.string(); config.trust_on_first_use = false;
+    int decisions = 0;
+    bool accept = false;
+    config.confirm_certificate = [&](const auto& address, const auto& fingerprint, const auto& previous) {
+        ++decisions; CHECK(!address.empty()); CHECK(fingerprint == files.fingerprint); CHECK(previous.empty()); return accept;
+    };
+    {
+        boost::asio::io_context io; ChatClient client(io, config);
+        CHECK(!client.connect("localhost", server.port()));
+        CHECK(!std::filesystem::exists(path));
+    }
+    accept = true;
+    {
+        boost::asio::io_context io; ChatClient client(io, config);
+        CHECK(client.connect("localhost", server.port()));
+        CHECK(std::filesystem::exists(path));
+    }
+    {
+        boost::asio::io_context io; ChatClient client(io, config);
+        CHECK(client.connect("localhost", server.port()));
+        CHECK(decisions == 2); // known certificate never prompts again
+    }
+    { std::ofstream changed(path); changed << "localhost:" << server.port() << "|" << std::string(64, '0') << "\n"; }
+    config.confirm_certificate = [&](const auto&, const auto&, const auto& previous) { CHECK(previous == std::string(64, '0')); return false; };
+    {
+        boost::asio::io_context io; ChatClient client(io, config);
+        CHECK(!client.connect("localhost", server.port()));
+    }
+    config.confirm_certificate = [&](const auto&, const auto&, const auto& previous) { CHECK(previous == std::string(64, '0')); return true; };
+    {
+        boost::asio::io_context io; ChatClient client(io, config);
+        CHECK(client.connect("localhost", server.port()));
+    }
+    server.stop(); server_thread.join(); remove_file(path);
+}
+
 void plaintext_requires_an_explicit_client_choice()
 {
     boost::asio::io_context server_io;
@@ -291,8 +358,10 @@ int main()
     if (sodium_init() < 0)
         return EXIT_FAILURE;
 
+    generated_certificates_are_reused();
     const auto first = create_certificate(1);
     const auto second = create_certificate(2);
+    explicit_trust_decisions(first);
     trusted_ca_and_pin_are_accepted(first);
     certificate_changes_are_blocked(first, second);
     plaintext_requires_an_explicit_client_choice();

@@ -36,3 +36,5 @@ bool is_valid_chat_message(const std::string& message);
 std::string timestamp();
 std::vector<std::string> split(const std::string& s, char delim);
 std::string join_fields(const std::vector<std::string>& fields, size_t start, char delim);
+
+std::vector<std::string> local_network_addresses();

@@ -24,6 +24,7 @@ struct ChatInputContext
     ChatServer* server = nullptr;
     std::string local_nickname;
     bool host_commands_enabled = false;
+    std::string connection_details;
 };
 
 enum class ChatInputResult

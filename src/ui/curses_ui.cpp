@@ -2,6 +2,7 @@
 
 #include "app/app_state.h"
 #include "app/commands.h"
+#include "chat/chat_client.h"
 #include "common/constants.h"
 #include "ui/terminal_model.h"
 #include "ui/display_text.h"
@@ -367,6 +368,7 @@ int choose_curses_menu(const std::string& title, const std::string& subtitle,
             curs_set(0); refresh();
         }
         const int ch = getch();
+        if (ch == KEY_F(4)) { show_curses_notice(title, subtitle + "\n\n" + items[selected].title + "\n" + items[selected].description); continue; }
         if (ch == 27) return -1;
         if (LINES < 12 || COLS < 40) continue;
         if (ch == KEY_UP) selected = (selected + items.size() - 1) % items.size();
@@ -418,6 +420,7 @@ void edit_curses_form(const std::string& title, const std::string& subtitle,
             refresh();
         }
         int ch = getch();
+        if (ch == KEY_F(4)) { show_curses_notice(title, subtitle + "\n\n" + fields[selected].label); continue; }
         if (ch == 27) throw CursesFormCancelled{};
         if (LINES < 12 || COLS < 40) continue;
         const bool submit = ch == '\n' || ch == '\r' || ch == KEY_ENTER;
@@ -457,19 +460,27 @@ void edit_curses_form(const std::string& title, const std::string& subtitle,
 void show_curses_notice(const std::string& title, const std::string& detail, bool wait)
 {
     timeout(-1);
+    int offset = 0;
     do
     {
+        int max_offset = 0;
         if (!too_small())
         {
-            page(title, "", wait ? display::continue_back : display::please_wait);
             auto lines = wrap_text(detail, COLS - 6);
-            int row = 7;
-            for (const auto& line : lines)
-                if (row < LINES - 3) put(row++, 3, line, COLS - 6);
+            const int top = 6;
+            const int available = std::max(1, LINES - top - 3);
+            max_offset = std::max(0, static_cast<int>(lines.size()) - available);
+            offset = std::clamp(offset, 0, max_offset);
+            page(title, "", wait ? (max_offset > 0 ? "Up/Down: scroll | Enter/Esc: back" : display::continue_back)
+                : display::please_wait);
+            for (int row = 0; row < available && row + offset < static_cast<int>(lines.size()); ++row)
+                put(top + row, 3, lines[row + offset], COLS - 6);
             curs_set(0); refresh();
         }
         if (!wait) return;
         const int ch = getch();
+        if (ch == KEY_DOWN || ch == KEY_NPAGE) offset = std::min(max_offset, offset + 1);
+        if (ch == KEY_UP || ch == KEY_PPAGE) offset = std::max(0, offset - 1);
         if (ch == '\n' || ch == '\r' || ch == KEY_ENTER || ch == 27) return;
     } while (true);
 }
@@ -491,28 +502,48 @@ void draw_curses_chat_ui(const std::string& input)
     view.editor.set(input);
     render_chat(view);
 }
-void run_curses_chat_loop(const ChatInputContext& context)
+void show_walkthrough()
+{
+    show_curses_notice("Chatbox guide",
+        "JOIN: ask the host for an invite or an address and TCP port (usually 7777). "
+        "Review invite details before joining. A fingerprint only identifies the host if you received it through a trusted channel.\n\n"
+        "HOST: choose Host, keep TLS enabled, then generate a certificate. Share a LAN address with people on the same network. "
+        "Internet guests need your public address and TCP forwarding; UPnP success does not verify reachability. F3 opens hosting details and invites.\n\n"
+        "SECURITY: TLS encrypts traffic between each person and the server, not end-to-end between participants. "
+        "A password controls access; it does not replace encryption. Compare unknown or changed fingerprints with the host.\n\n"
+        "ROOMS: F2 selects a room. /create music creates one; /join music enters it; /topic Listening together changes its topic.\n\n"
+        "PEOPLE: /users lists people; /whisper alex hello sends a private message in this room. "
+        "If you are alone, share an invite from F3 or switch rooms.\n\n"
+        "KEYBOARD: Enter sends; Tab completes; Left/Right and Home/End edit; Up/Down recall sent messages; "
+        "PgUp/PgDn scroll; Ctrl+G returns to latest. F1 opens this guide; F3 shows connection/security details. "
+        "Esc or /exit returns to server selection. Unsent drafts remain in memory.\n\n"
+        "RECOVERY: dropped connections retry up to three times. Esc cancels. Password, ban, nickname and certificate errors need your review. "
+        "Messages with uncertain delivery are never resent automatically.");
+}
+
+ChatExit run_curses_chat_loop(const ChatInputContext& context, std::string& draft)
 {
     ChatView view;
+    view.editor.set(draft);
+    struct SaveDraft { std::string& draft; ChatView& view; ~SaveDraft() { draft = view.editor.text; } } save{draft, view};
     view.nickname = context.local_nickname;
     view.host = context.host_commands_enabled;
     timeout(100);
     while (true)
     {
-        if (context.client && was_kicked())
+        if (context.client && (!context.client->connected() || was_kicked()))
         {
             render_chat(view);
-            const auto messages = message_snapshot();
-            show_curses_notice(display::session_ended, messages.empty()
-                ? display::server_ended_session : messages.back());
-            return;
+            if (was_kicked()) show_curses_notice(display::session_ended, context.client->kick_reason());
+            else push_message("[system] Connection ended: " + context.client->disconnect_reason());
+            return ChatExit::Disconnected;
         }
         render_chat(view);
         const int ch = getch();
         if (ch == ERR || ch == KEY_RESIZE) continue;
         if (view.leaving)
         {
-            if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) return;
+            if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) return ChatExit::Left;
             if (ch == 27) view.leaving = false;
             continue;
         }
@@ -526,7 +557,8 @@ void run_curses_chat_loop(const ChatInputContext& context)
         view.hint.clear();
         switch (ch)
         {
-        case KEY_F(1): view.help = true; break;
+        case KEY_F(1): show_walkthrough(); timeout(100); break;
+        case KEY_F(3): show_curses_notice("Connection / invite", context.connection_details); timeout(100); break;
         case KEY_F(2):
         {
             const auto state = chat_state_snapshot();
@@ -542,7 +574,7 @@ void run_curses_chat_loop(const ChatInputContext& context)
         case '\n': case '\r': case KEY_ENTER:
             if (!view.editor.text.empty())
             {
-                if (handle_chat_input(view.editor.text, context) == ChatInputResult::Exit) return;
+                if (handle_chat_input(view.editor.text, context) == ChatInputResult::Exit) { view.editor.set(""); return ChatExit::Left; }
                 view.history.remember(view.editor.text);
                 view.editor.set("");
                 view.scroll.latest();

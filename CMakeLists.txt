@@ -66,8 +66,10 @@ set(CHATBOX_CORE_SOURCES
   "src/app/dedicated_server.h"
   "src/network/server_browser.cpp"
   "src/network/server_browser.h"
+  "src/storage/preferences.cpp"
   "src/storage/storage.cpp"
   "src/storage/storage.h"
+  "src/network/invite.cpp"
   "src/network/tls.cpp"
   "src/network/tls.h"
   "src/network/transport.h"
@@ -90,6 +92,9 @@ target_link_libraries(chatbox_core
     Threads::Threads
 )
 target_compile_features(chatbox_core PUBLIC cxx_std_20)
+if (WIN32)
+  target_link_libraries(chatbox_core PUBLIC iphlpapi)
+endif()
 
 add_library(chatbox_terminal_model STATIC "src/ui/terminal_model.cpp")
 target_include_directories(chatbox_terminal_model PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -125,6 +130,14 @@ target_link_libraries(chatbox
 target_compile_features(chatbox PRIVATE cxx_std_20)
 
 if (BUILD_TESTING)
+  add_executable(chatbox_invite_tests "tests/invite_tests.cpp")
+  target_link_libraries(chatbox_invite_tests PRIVATE chatbox_core)
+  add_test(NAME invites COMMAND chatbox_invite_tests)
+  add_executable(chatbox_connection_tests "tests/connection_tests.cpp")
+  target_link_libraries(chatbox_connection_tests PRIVATE chatbox_core)
+  add_test(NAME connections COMMAND chatbox_connection_tests)
+  set_tests_properties(connections PROPERTIES TIMEOUT 10)
+
   add_executable(chatbox_terminal_tests "tests/terminal_tests.cpp")
   target_link_libraries(chatbox_terminal_tests PRIVATE chatbox_terminal_model)
   add_test(NAME terminal COMMAND chatbox_terminal_tests)
