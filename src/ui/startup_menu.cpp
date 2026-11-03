@@ -15,11 +15,9 @@ std::optional<int> run_startup_menu()
             { 'c', display::start_chatting, display::start_chatting_detail },
             { 'd', display::run_server, display::run_server_detail },
             { 'b', display::run_directory, display::run_directory_detail },
-            { 'g', display::quick_guide, display::quick_guide_detail },
             { 'q', display::quit, display::see_you }
         });
-        if (mode < 0 || mode == 4) { shutdown_curses_ui(); return 0; }
-        if (mode == 3) { show_walkthrough(); continue; }
+        if (mode < 0 || mode == 3) { shutdown_curses_ui(); return 0; }
         if (mode == 0) return std::nullopt;
         try
         {

@@ -28,7 +28,6 @@ void shutdown_curses_ui();
 void destroy_curses_windows();
 enum class ChatExit { Left, Disconnected };
 ChatExit run_curses_chat_loop(const ChatInputContext& context, std::string& draft);
-void show_walkthrough();
 void draw_curses_chat_ui(const std::string& input);
 int choose_curses_menu(const std::string& title, const std::string& subtitle,
     const std::vector<CursesMenuItem>& items);

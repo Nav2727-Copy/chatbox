@@ -239,11 +239,9 @@ int run_curses_app()
             { 'r', "Recent servers", "Review, join, rename, or remove a remembered server." },
             { 'n', "Nickname and preferences", "Choose a local identity and whether to remember servers." },
             { 'i', "Join by invite", "Paste a versioned Chatbox invite and review its settings." },
-            { 'g', "Quick guide", "Revisit joining, hosting and security help." },
             { 'q', display::quit, display::close_chatbox }
         });
-        const int ch = choice < 0 ? 'q' : std::string("jhbrnigq")[choice];
-        if (ch == 'g') { show_walkthrough(); continue; }
+        const int ch = choice < 0 ? 'q' : std::string("jhbrniq")[choice];
         std::optional<chatbox::storage::RecentServer> recent;
         if (ch == 'r') {
             std::vector<CursesMenuItem> items;

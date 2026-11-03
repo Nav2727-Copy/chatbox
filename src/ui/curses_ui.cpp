@@ -502,18 +502,6 @@ void draw_curses_chat_ui(const std::string& input)
     view.editor.set(input);
     render_chat(view);
 }
-void show_walkthrough()
-{
-    show_curses_notice(display::quick_guide_title,
-        std::string(display::quick_guide_join) + "\n\n"
-        + display::quick_guide_host + "\n\n"
-        + display::quick_guide_security + "\n\n"
-        + display::quick_guide_rooms + "\n\n"
-        + display::quick_guide_people + "\n\n"
-        + display::quick_guide_keyboard + "\n\n"
-        + display::quick_guide_recovery);
-}
-
 ChatExit run_curses_chat_loop(const ChatInputContext& context, std::string& draft)
 {
     ChatView view;
@@ -550,7 +538,6 @@ ChatExit run_curses_chat_loop(const ChatInputContext& context, std::string& draf
         view.hint.clear();
         switch (ch)
         {
-        case KEY_F(1): show_walkthrough(); timeout(100); break;
         case KEY_F(3): show_curses_notice("Connection / invite", context.connection_details); timeout(100); break;
         case KEY_F(2):
         {
