@@ -106,6 +106,26 @@ inline constexpr char dedicated_server[] = "Dedicated server";
 inline constexpr char dedicated_description[] = "Set up a persistent home for your community.";
 inline constexpr char server_directory[] = "Server directory";
 inline constexpr char directory_description[] = "Publish and discover servers on port 2727.";
+inline constexpr char quick_guide[] = "Quick guide";
+inline constexpr char quick_guide_detail[] = "Joining, hosting, security and keyboard help";
+inline constexpr char quick_guide_title[] = "Chatbox guide";
+inline constexpr char quick_guide_join[] = "JOIN: ask the host for an invite or an address and TCP port (usually 7777). Review invite details before joining. A fingerprint only identifies the host if you received it through a trusted channel.\n";
+inline constexpr char quick_guide_host[] = "HOST: choose Host, keep TLS enabled, then generate a certificate. Share a LAN address with people on the same network. Internet guests need your public address and TCP forwarding; UPnP success does not verify reachability. F3 opens hosting details and invites.\n";
+inline constexpr char quick_guide_security[] = "SECURITY: TLS encrypts traffic between each person and the server, not end-to-end between participants. A password controls access; it does not replace encryption. Compare unknown or changed fingerprints with the host.\n";
+inline constexpr char quick_guide_rooms[] = "ROOMS: F2 selects a room. /create music creates one; /join music enters it; /topic Listening together changes its topic.\n";
+inline constexpr char quick_guide_people[] = "PEOPLE: /users lists people; /whisper alex hello sends a private message in this room. If you are alone, share an invite from F3 or switch rooms.\n";
+inline constexpr char quick_guide_keyboard[] = "KEYBOARD: Enter sends; Tab completes; Left/Right and Home/End edit; Up/Down recall sent messages; PgUp/PgDn scroll; Ctrl+G returns to latest. F1 opens this guide; F3 shows connection/security details. Esc or /exit returns to server selection. Unsent drafts remain in memory.\n";
+inline constexpr char quick_guide_recovery[] = "RECOVERY: dropped connections retry up to three times. Esc cancels. Password, ban, nickname and certificate errors need your review. Messages with uncertain delivery are never resent automatically.\n";
+inline constexpr char invite_field[] = "Chatbox invite";
+inline constexpr char invite_form_title[] = "Join by invite";
+inline constexpr char invite_form_help[] = "Paste an invite from someone you trust. It contains no password.";
+inline constexpr char invite_review_title[] = "Review invite";
+inline constexpr char invite_review_prompt[] = "Use this invite?";
+inline constexpr char invite_review_help[] = "Review the address and security details first.";
+inline constexpr char invite_back_action[] = "Back";
+inline constexpr char invite_join_action[] = "Join";
+inline constexpr char invite_discard[] = "Discard invite.";
+inline constexpr char invite_join[] = "Use these connection details.";
 
 // Join and hosting guidance
 inline constexpr char connection_dns_error[] = "Could not find that server address. Check the spelling and your internet connection, then try again.";

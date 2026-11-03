@@ -18,7 +18,7 @@ if (WIN32)
 endif()
 
 # ---- Packages ----
-find_package(Boost REQUIRED COMPONENTS asio)
+find_package(boost_asio CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)

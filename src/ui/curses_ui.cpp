@@ -504,21 +504,14 @@ void draw_curses_chat_ui(const std::string& input)
 }
 void show_walkthrough()
 {
-    show_curses_notice("Chatbox guide",
-        "JOIN: ask the host for an invite or an address and TCP port (usually 7777). "
-        "Review invite details before joining. A fingerprint only identifies the host if you received it through a trusted channel.\n\n"
-        "HOST: choose Host, keep TLS enabled, then generate a certificate. Share a LAN address with people on the same network. "
-        "Internet guests need your public address and TCP forwarding; UPnP success does not verify reachability. F3 opens hosting details and invites.\n\n"
-        "SECURITY: TLS encrypts traffic between each person and the server, not end-to-end between participants. "
-        "A password controls access; it does not replace encryption. Compare unknown or changed fingerprints with the host.\n\n"
-        "ROOMS: F2 selects a room. /create music creates one; /join music enters it; /topic Listening together changes its topic.\n\n"
-        "PEOPLE: /users lists people; /whisper alex hello sends a private message in this room. "
-        "If you are alone, share an invite from F3 or switch rooms.\n\n"
-        "KEYBOARD: Enter sends; Tab completes; Left/Right and Home/End edit; Up/Down recall sent messages; "
-        "PgUp/PgDn scroll; Ctrl+G returns to latest. F1 opens this guide; F3 shows connection/security details. "
-        "Esc or /exit returns to server selection. Unsent drafts remain in memory.\n\n"
-        "RECOVERY: dropped connections retry up to three times. Esc cancels. Password, ban, nickname and certificate errors need your review. "
-        "Messages with uncertain delivery are never resent automatically.");
+    show_curses_notice(display::quick_guide_title,
+        std::string(display::quick_guide_join) + "\n\n"
+        + display::quick_guide_host + "\n\n"
+        + display::quick_guide_security + "\n\n"
+        + display::quick_guide_rooms + "\n\n"
+        + display::quick_guide_people + "\n\n"
+        + display::quick_guide_keyboard + "\n\n"
+        + display::quick_guide_recovery);
 }
 
 ChatExit run_curses_chat_loop(const ChatInputContext& context, std::string& draft)

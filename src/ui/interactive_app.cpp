@@ -503,16 +503,16 @@ int run_curses_app()
                     client_tls.expected_fingerprint = recent->fingerprint;
                 }
                 else if (ch == 'i') {
-                    std::vector<CursesField> fields{required_field("Chatbox invite", "", 1024)};
-                    edit_curses_form("Join by invite", "Paste an invite from someone you trust. It contains no password.", fields);
+                    std::vector<CursesField> fields{required_field(display::invite_field, "", 1024)};
+                    edit_curses_form(display::invite_form_title, display::invite_form_help, fields);
                     const auto invite = chatbox::parse_invite(fields[0].value);
-                    show_curses_notice("Review invite", invite.host + ":" + std::to_string(invite.port)
+                    show_curses_notice(display::invite_review_title, invite.host + ":" + std::to_string(invite.port)
                         + (invite.tls ? "\nTLS enabled." : "\nINSECURE plaintext exposes messages and passwords.")
                         + (invite.password_required ? "\nPassword required; ask the host separately." : "\nNo password indicated.")
                         + "\nSHA-256: " + (invite.fingerprint.empty() ? "not supplied" : invite.fingerprint)
                         + "\nA fingerprint is useful only if this invite came through a trusted channel.");
-                    if (choose_curses_menu("Use this invite?", "Review the address and security details first.", {
-                        {'b', "Back", "Discard invite."}, {'j', "Join", "Use these connection details."}}) != 1) continue;
+                    if (choose_curses_menu(display::invite_review_prompt, display::invite_review_help, {
+                        {'b', display::invite_back_action, display::invite_discard}, {'j', display::invite_join_action, display::invite_join}}) != 1) continue;
                     selected_host = invite.host; selected_port = invite.port;
                     client_tls.enabled = invite.tls; client_tls.expected_fingerprint = invite.fingerprint;
                 }
